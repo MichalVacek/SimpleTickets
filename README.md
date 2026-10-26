@@ -2,7 +2,7 @@
 
 A lightweight, local-first ticketing app. Tickets are plain Markdown files in a folder tree, much like an Obsidian vault. A small background daemon keeps them consistent and exposes a local API. Everything beyond ticket management is a plugin.
 
-Status: early development. The command line works; the daemon and API are in progress.
+Status: early development. The command line, daemon and local API work.
 
 ## Goals
 
@@ -44,6 +44,29 @@ simpletickets templates
 - `set-status`, `create` and `rescan` run the rules afterwards. A sub-ticket in progress sets its parent to in progress; a done (or, by default, cancelled) blocker stops blocking. Parents inside `parent_folder` are specification files: their state is derived and never written. Automatic changes are appended to `.simpletickets/audit.jsonl`; `rescan --dry-run` shows them without writing.
 - Custom templates are Markdown files in `.simpletickets/templates/NAME.md` using `{{title}}`, `{{id}}` and `{{date}}`.
 - `doctor` exits non-zero when it finds duplicate IDs, malformed frontmatter, missing link targets, cycles or orphans.
+
+## Daemon and API
+
+```
+simpletickets daemon --port 7878 --scan-interval 60
+```
+
+The daemon scans all folders on startup, watches them for changes, rescans periodically and runs the rules after each scan. The API listens on `127.0.0.1` only and requires `Authorization: Bearer <token>`. The token is generated on first run and stored in `.simpletickets/token` (owner-only permissions; `--token-file` overrides the location). Requests whose `Host` is not a localhost name are refused.
+
+| Route | Purpose |
+|---|---|
+| `GET /v1/health` | version and ticket count |
+| `GET /v1/parents` | parent tickets |
+| `GET /v1/tickets?status=&category=&priority=&tag=&parent=&title=&blocked=&due_by=&field.<key>=&limit=` | list and filter |
+| `GET /v1/tickets/{id}` | one ticket with body and derived data |
+| `POST /v1/tickets` | create (`title`, `status`, `priority`, `due`, `tags`, `parent`, `blocked_by`, `related`, `template`, `body`, `role`) |
+| `PATCH /v1/tickets/{id}` | update; `null` clears `priority`, `due`, `parent` |
+| `POST /v1/rescan` | scan and run the rules now |
+| `GET /v1/doctor` | consistency report |
+| `GET /v1/config`, `PUT /v1/config` | read or replace the configuration (`{"yaml": "..."}`) |
+| `GET /v1/events?since=N&wait=S` | event stream by long polling: events after sequence `N`, waiting up to `S` seconds |
+| `GET /v1/audit?limit=N` | automatic changes |
+| `GET /v1/templates` | template names |
 
 ## Documentation
 

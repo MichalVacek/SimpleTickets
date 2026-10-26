@@ -283,6 +283,17 @@ impl Config {
     }
 }
 
+/// Replaces the config file in `dir` atomically.
+pub fn write_file(dir: &Path, text: &str) -> std::io::Result<()> {
+    let path = dir.join(CONFIG_FILE);
+    let temp = dir.join(format!(".{CONFIG_FILE}.{}.tmp", std::process::id()));
+    let result = std::fs::write(&temp, text).and_then(|()| std::fs::rename(&temp, &path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 fn invalid<T>(message: String) -> Result<T, ConfigError> {
     Err(ConfigError::Invalid(message))
 }

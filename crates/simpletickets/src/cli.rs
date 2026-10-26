@@ -60,6 +60,24 @@ pub enum Command {
     },
     /// List available ticket templates
     Templates,
+    /// Run the background daemon with the local API
+    Daemon(DaemonArgs),
+}
+
+#[derive(Args)]
+pub struct DaemonArgs {
+    /// Port on 127.0.0.1
+    #[arg(long, default_value_t = crate::daemon::DEFAULT_PORT)]
+    pub port: u16,
+    /// Seconds between periodic scans
+    #[arg(long, default_value_t = 60)]
+    pub scan_interval: u64,
+    /// Token file (default: .simpletickets/token in the tickets folder)
+    #[arg(long)]
+    pub token_file: Option<PathBuf>,
+    /// Do not watch files; rely on periodic scans
+    #[arg(long)]
+    pub no_watch: bool,
 }
 
 #[derive(Args)]
@@ -273,6 +291,18 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                 println!("{count} tickets");
                 print_rules(&report);
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Daemon(args) => {
+            let mut options = crate::daemon::Options::new(ctx.dir.clone());
+            options.port = args.port;
+            options.scan_interval = Duration::from_secs(args.scan_interval.max(1));
+            options.token_file = args.token_file;
+            options.watch = !args.no_watch;
+            let running = crate::daemon::start(options)?;
+            println!("listening on http://{}/v1", running.addr);
+            println!("token file: {}", running.token_file().display());
+            running.wait();
             Ok(ExitCode::SUCCESS)
         }
         Command::Templates => {
