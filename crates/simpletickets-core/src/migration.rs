@@ -565,6 +565,10 @@ statuses:\n  todo: [todo, backlog]\n  in-progress: [doing]\n  done: [done]\n  ca
         Store::scan(&Config::load_from_dir(dir).unwrap())
     }
 
+    fn slashed(p: &Path) -> String {
+        p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")
+    }
+
     /// Relative file paths with content, ignoring the state folder.
     fn snapshot(dir: &Path) -> BTreeMap<String, String> {
         fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
@@ -576,7 +580,7 @@ statuses:\n  todo: [todo, backlog]\n  in-progress: [doing]\n  done: [done]\n  ca
                 if p.is_dir() {
                     walk(base, &p, out);
                 } else {
-                    let rel = p.strip_prefix(base).unwrap().display().to_string();
+                    let rel = slashed(p.strip_prefix(base).unwrap());
                     out.insert(rel, fs::read_to_string(&p).unwrap());
                 }
             }
@@ -591,7 +595,7 @@ statuses:\n  todo: [todo, backlog]\n  in-progress: [doing]\n  done: [done]\n  ca
         s.tickets()
             .map(|e| {
                 let rel = e.path.strip_prefix(resolve(dir)).unwrap();
-                (e.ticket.id.clone(), rel.display().to_string())
+                (e.ticket.id.clone(), slashed(rel))
             })
             .collect()
     }
