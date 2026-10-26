@@ -2,6 +2,7 @@
 
 use crate::api;
 use crate::token;
+use crate::update::{self, Release, UpdateCheck};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
@@ -11,6 +12,7 @@ use simpletickets_core::rules::{self, RunOptions};
 use simpletickets_core::state::{audit_log_path, ensure_state_dir, token_path, STATE_DIR};
 use simpletickets_core::store::Store;
 use simpletickets_core::time::now_timestamp;
+use simpletickets_core::VERSION;
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -36,6 +38,8 @@ pub struct Options {
     /// Token file; defaults to the state folder.
     pub token_file: Option<PathBuf>,
     pub watch: bool,
+    /// Periodic check for a newer release; `None` disables it.
+    pub update_check: Option<UpdateCheck>,
 }
 
 impl Options {
@@ -46,6 +50,7 @@ impl Options {
             scan_interval: Duration::from_secs(60),
             token_file: None,
             watch: true,
+            update_check: None,
         }
     }
 }
@@ -121,6 +126,7 @@ pub struct Shared {
     token: String,
     inner: Mutex<Inner>,
     scheduler: Mutex<Option<Sender<Message>>>,
+    update: Mutex<Option<Release>>,
 }
 
 /// What a rescan found, for callers that schedule follow-ups.
@@ -134,6 +140,14 @@ pub struct ScanOutcome {
 impl Shared {
     pub fn verify_token(&self, given: &str) -> bool {
         token::matches(&self.token, given)
+    }
+
+    /// The newer release found by the update check, if any.
+    pub fn available_update(&self) -> Option<Release> {
+        self.update
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -292,6 +306,7 @@ pub fn start(options: Options) -> Result<Running, String> {
         stop: AtomicBool::new(false),
         token,
         scheduler: Mutex::new(None),
+        update: Mutex::new(None),
         inner: Mutex::new(Inner {
             store: Store::scan(&config),
             config,
@@ -332,6 +347,10 @@ pub fn start(options: Options) -> Result<Running, String> {
             schedule(&shared, &rx, &tx, interval, watch)
         }));
     }
+    if let Some(check) = options.update_check.clone() {
+        let shared = shared.clone();
+        threads.push(thread::spawn(move || run_update_checks(&shared, &check)));
+    }
     Ok(Running {
         addr,
         shared,
@@ -339,6 +358,26 @@ pub fn start(options: Options) -> Result<Running, String> {
         tx,
         threads,
     })
+}
+
+/// Checks at startup and then every interval until the daemon stops.
+fn run_update_checks(shared: &Shared, check: &UpdateCheck) {
+    while !shared.stop.load(Ordering::Relaxed) {
+        if let Some(release) = update::check_once(check.fetcher.as_ref(), VERSION) {
+            let mut slot = shared.update.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref() != Some(&release) {
+                shared.events.publish(
+                    "update.available",
+                    json!({"current": VERSION, "latest": release.tag, "url": release.url}),
+                );
+                *slot = Some(release);
+            }
+        }
+        let deadline = Instant::now() + check.interval;
+        while Instant::now() < deadline && !shared.stop.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(100).min(check.interval));
+        }
+    }
 }
 
 fn schedule(

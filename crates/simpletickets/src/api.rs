@@ -170,9 +170,16 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
     match (segments.as_slice(), method) {
         (["v1", "health"], "GET") => {
             let inner = shared.lock();
+            let update = shared
+                .available_update()
+                .map(|r| json!({"latest": r.tag, "url": r.url}));
             reply(
                 200,
-                json!({"version": simpletickets_core::VERSION, "tickets": inner.store.tickets().count()}),
+                json!({
+                    "version": simpletickets_core::VERSION,
+                    "tickets": inner.store.tickets().count(),
+                    "update": update,
+                }),
             )
         }
         (["v1", "parents"], "GET") => {

@@ -14,10 +14,20 @@ pub struct Api {
 }
 
 pub fn start(dir: &Path, watch: bool, interval: Duration) -> Api {
+    start_with(dir, watch, interval, |_| {})
+}
+
+pub fn start_with(
+    dir: &Path,
+    watch: bool,
+    interval: Duration,
+    configure: impl FnOnce(&mut Options),
+) -> Api {
     let mut options = Options::new(dir.to_path_buf());
     options.port = 0;
     options.watch = watch;
     options.scan_interval = interval;
+    configure(&mut options);
     let running = daemon::start(options).expect("daemon starts");
     let token = std::fs::read_to_string(running.token_file()).unwrap();
     Api {

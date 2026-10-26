@@ -55,7 +55,7 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 
 | Route | Purpose |
 |---|---|
-| `GET /v1/health` | version and ticket count |
+| `GET /v1/health` | version, ticket count and `update` (`null`, or the newer release found by the update check) |
 | `GET /v1/parents` | parent tickets |
 | `GET /v1/tickets?status=&category=&priority=&tag=&parent=&title=&blocked=&due_by=&field.<key>=&limit=` | list and filter |
 | `GET /v1/tickets/{id}` | one ticket with body and derived data |
@@ -69,6 +69,10 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 | `GET /v1/events?since=N&wait=S` | event stream by long polling: events after sequence `N`, waiting up to `S` seconds |
 | `GET /v1/audit?limit=N` | automatic changes |
 | `GET /v1/templates` | template names |
+
+## Update check
+
+The daemon asks the GitHub releases of `MichalVacek/SimpleTickets` for the latest release at startup and then every 24 hours (`--update-interval-hours`). A newer version is announced once through an `update.available` event and in the `update` field of `/v1/health`. Nothing is downloaded or installed. Being offline or hitting a GitHub error is silent; the check simply runs again later. Disable it with `--no-update-check`.
 
 ## Migration
 

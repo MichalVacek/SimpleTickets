@@ -110,6 +110,12 @@ pub struct DaemonArgs {
     /// Do not watch files; rely on periodic scans
     #[arg(long)]
     pub no_watch: bool,
+    /// Do not check GitHub for newer releases
+    #[arg(long)]
+    pub no_update_check: bool,
+    /// Hours between update checks
+    #[arg(long, default_value_t = 24)]
+    pub update_interval_hours: u64,
 }
 
 #[derive(Args)]
@@ -331,6 +337,11 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             options.scan_interval = Duration::from_secs(args.scan_interval.max(1));
             options.token_file = args.token_file;
             options.watch = !args.no_watch;
+            if !args.no_update_check {
+                let mut check = crate::update::UpdateCheck::github();
+                check.interval = Duration::from_secs(args.update_interval_hours.max(1) * 3600);
+                options.update_check = Some(check);
+            }
             let running = crate::daemon::start(options)?;
             println!("listening on http://{}/v1", running.addr);
             println!("token file: {}", running.token_file().display());
