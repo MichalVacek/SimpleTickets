@@ -1,7 +1,8 @@
 //! The background process: shared state, scheduled scans, file watching and the HTTP server.
 
 use crate::api;
-use crate::logger::{self, Level, Logger};
+use crate::events::{self, Events};
+use crate::logger::Logger;
 use crate::token;
 use crate::update::{self, Release, UpdateCheck};
 use notify::{PollWatcher, RecursiveMode, Watcher};
@@ -16,14 +17,13 @@ use simpletickets_core::state::{
     audit_log_path, ensure_state_dir, is_within, token_path, STATE_DIR,
 };
 use simpletickets_core::store::Store;
-use simpletickets_core::time::now_timestamp;
 use simpletickets_core::VERSION;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,6 @@ use std::time::{Duration, Instant};
 pub const BIND_ADDRESS: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_PORT: u16 = 7878;
 const WORKERS: usize = 8;
-const EVENT_BACKLOG: usize = 1000;
 const WATCH_QUIET: Duration = Duration::from_millis(300);
 const RETRY_AFTER: Duration = Duration::from_secs(3);
 
@@ -53,6 +52,8 @@ pub struct Options {
     pub update_check: Option<UpdateCheck>,
     /// Heartbeat age after which another daemon may take over this folder's lease.
     pub lease_ttl: Duration,
+    /// How many events the stream keeps for clients that poll late.
+    pub event_backlog: usize,
     pub logger: Arc<Logger>,
 }
 
@@ -68,66 +69,10 @@ impl Options {
             poll_interval: None,
             update_check: None,
             lease_ttl: lease::DEFAULT_TTL,
+            event_backlog: events::DEFAULT_BACKLOG,
             logger: Arc::new(Logger::discard()),
         }
     }
-}
-
-/// Sequence-numbered log of recent events, with blocking reads.
-pub struct Events {
-    log: Mutex<(u64, VecDeque<Value>)>,
-    changed: Condvar,
-    logger: Arc<Logger>,
-}
-
-/// The log level and message line for an event. Rule applications use the level the
-/// rule engine chose from the ticket's tags (`tag_logging`).
-fn log_entry(kind: &str, data: &Value) -> (Level, String) {
-    let text = |key: &str| {
-        data.get(key)
-            .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
-    };
-    let keys: &[&str] = match kind {
-        "rule.applied" => &["rule", "id", "from", "to", "reason"],
-        "scan" => &["reason", "tickets", "problems"],
-        "root.offline" => &["root", "message", "frozen"],
-        "root.online" => &["root"],
-        "lease.lost" | "state.error" | "config.invalid" | "migration.error" => &["message"],
-        "migration.started" | "migration.suggested" => &["steps", "conflicts", "actions"],
-        "migration.finished" => &["state", "steps", "conflicts"],
-        "update.available" => &["current", "latest", "url"],
-        "warning.raised" => &["id", "rule", "message"],
-        "ticket.created" | "ticket.deleted" | "ticket.moved" | "ticket.updated" => {
-            &["id", "title", "source"]
-        }
-        "ticket.status_changed" => &["id", "from", "to", "source"],
-        "tombstone.forgotten" => &["id"],
-        _ => &[],
-    };
-    let pairs: Vec<(&str, String)> = keys
-        .iter()
-        .filter_map(|k| text(k).map(|v| (*k, v)))
-        .collect();
-    let level = match kind {
-        "state.error" | "config.invalid" | "migration.error" => Level::Error,
-        "root.offline" | "lease.lost" | "warning.raised" => Level::Warn,
-        "rule.applied" => match data.get("level").and_then(Value::as_str) {
-            Some("warn") => Level::Warn,
-            _ => Level::Info,
-        },
-        "scan" if data.get("reason").and_then(Value::as_str) == Some("startup") => Level::Info,
-        "scan" | "ticket.created" | "ticket.updated" | "ticket.status_changed" | "ticket.moved" => {
-            Level::Debug
-        }
-        _ => Level::Info,
-    };
-    let fields = logger::fields(&pairs);
-    let line = if fields.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind} {fields}")
-    };
-    (level, line)
 }
 
 /// Reasons for a rescan that follow a write made through the API; any other
@@ -153,60 +98,6 @@ fn net_status_rewrites(changes: &[rules::Change]) -> Vec<(String, String, String
     }
     out.retain(|(_, from, to)| from != to);
     out
-}
-
-impl Events {
-    fn new(logger: Arc<Logger>) -> Events {
-        Events {
-            log: Mutex::new((1, VecDeque::new())),
-            changed: Condvar::new(),
-            logger,
-        }
-    }
-
-    pub fn publish(&self, kind: &str, data: Value) {
-        let (level, line) = log_entry(kind, &data);
-        self.logger.log(level, &line);
-        let mut guard = self.log.lock().unwrap_or_else(|e| e.into_inner());
-        let seq = guard.0;
-        guard.0 += 1;
-        guard
-            .1
-            .push_back(json!({"seq": seq, "time": now_timestamp(), "type": kind, "data": data}));
-        if guard.1.len() > EVENT_BACKLOG {
-            guard.1.pop_front();
-        }
-        self.changed.notify_all();
-    }
-
-    /// Events with a sequence number above `since`, waiting up to `wait` for the first one.
-    /// Returns the events and the sequence number to pass as `since` next time.
-    pub fn since(&self, since: u64, wait: Duration, stop: &AtomicBool) -> (Vec<Value>, u64) {
-        let deadline = Instant::now() + wait;
-        let mut guard = self.log.lock().unwrap_or_else(|e| e.into_inner());
-        loop {
-            let found: Vec<Value> = guard
-                .1
-                .iter()
-                .filter(|e| e["seq"].as_u64().unwrap_or(0) > since)
-                .cloned()
-                .collect();
-            let next = found
-                .last()
-                .and_then(|e| e["seq"].as_u64())
-                .unwrap_or_else(|| since.max(guard.0 - 1));
-            let left = deadline.saturating_duration_since(Instant::now());
-            if !found.is_empty() || left.is_zero() || stop.load(Ordering::Relaxed) {
-                return (found, next);
-            }
-            let slice = left.min(Duration::from_millis(250));
-            guard = self
-                .changed
-                .wait_timeout(guard, slice)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-        }
-    }
 }
 
 pub struct Inner {
@@ -480,7 +371,7 @@ pub fn start(options: Options) -> Result<Running, String> {
     let shared = Arc::new(Shared {
         dir: dir.clone(),
         logger: logger.clone(),
-        events: Events::new(logger.clone()),
+        events: Events::new(logger.clone(), options.event_backlog),
         audit: AuditLog::new(audit_log_path(&dir)),
         stop: AtomicBool::new(false),
         token,
@@ -705,24 +596,5 @@ mod tests {
         assert!(!is_relevant(Path::new("/t/.simpletickets/audit.jsonl")));
         assert!(!is_relevant(Path::new("/t/.simpletickets/templates/x.md")));
         assert!(!is_relevant(Path::new("/t/notes.txt")));
-    }
-
-    #[test]
-    fn events_are_sequenced_and_blocking() {
-        let events = Events::new(Arc::new(Logger::discard()));
-        let stop = AtomicBool::new(false);
-        let (none, next) = events.since(0, Duration::ZERO, &stop);
-        assert!(none.is_empty());
-        assert_eq!(next, 0);
-        events.publish("a", json!({}));
-        events.publish("b", json!({}));
-        let (all, next) = events.since(0, Duration::ZERO, &stop);
-        assert_eq!(all.len(), 2);
-        assert_eq!(next, 2);
-        let (rest, _) = events.since(1, Duration::ZERO, &stop);
-        assert_eq!(rest[0]["type"], "b");
-        let (empty, same) = events.since(2, Duration::from_millis(10), &stop);
-        assert!(empty.is_empty());
-        assert_eq!(same, 2);
     }
 }

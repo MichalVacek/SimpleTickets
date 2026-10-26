@@ -122,13 +122,13 @@ The container runs `simpletickets --dir /data daemon --bind-all --poll`. Bind mo
 simpletickets daemon --port 7878 --scan-interval 60
 ```
 
-Other flags: `--no-watch` (periodic scans only), `--poll` (see Docker), `--token-file`, `--no-update-check`, `--log-level`, `--log-file`.
+Other flags: `--no-watch` (periodic scans only), `--poll` (see Docker), `--token-file`, `--no-update-check`, `--event-backlog` (events kept for late pollers, default 1000), `--log-level`, `--log-file`.
 
 Logging: one line per entry, `<UTC time> <LEVEL> <message> key=value ...`, on stderr or appended to `--log-file`. `--log-level` is `error`, `warn`, `info` (default) or `debug`; `SIMPLETICKETS_LOG_LEVEL` and `SIMPLETICKETS_LOG_FILE` supply defaults that the flags override. The daemon logs startup and shutdown, scans (`debug`, except the startup scan), applied rules, rule warnings, errors, roots going offline or online, lease changes, migrations and update checks. A rule application is logged at `warn` when the ticket carries a tag configured as `warn` in `tag_logging`, otherwise at `info`. The API token is never logged.
 
 Shutdown: on SIGINT or SIGTERM (and SIGHUP on unix; Ctrl-C, Ctrl-Break or closing the console on Windows) the daemon stops accepting requests, lets the workers and the scheduler finish, releases the folder lease, flushes the log and exits with status 0. A second daemon can take over immediately instead of waiting for the lease to go stale. `launchctl bootout`, `systemctl --user stop` and `docker stop` all send SIGTERM, so they shut the daemon down the same way.
 
-Events published besides the scan and rule events: `root.offline`, `root.online`, `warning.raised`, `tombstone.forgotten`, `ticket.id_reassigned`, `lease.lost`, `lease.acquired`, `state.error`.
+Events: `ticket.created`, `ticket.updated`, `ticket.status_changed`, `ticket.moved`, `ticket.deleted` (for every change to a ticket, whether made through the API, a rule, the command line or by hand), plus `scan`, `rule.applied`, `root.offline`, `root.online`, `warning.raised`, `tombstone.forgotten`, `ticket.id_reassigned`, `lease.lost`, `lease.acquired`, `state.error` and others. The full contract (envelope, payloads, gap detection, delivery guarantees) is in [docs/api.md](docs/api.md).
 
 The daemon scans all folders on startup, watches them for changes, rescans periodically and runs the rules after each scan. The API listens on `127.0.0.1` only and requires `Authorization: Bearer <token>`. The token is generated on first run and stored in `.simpletickets/token` (owner-only permissions; `--token-file` overrides the location). Requests whose `Host` is not a localhost name are refused.
 
@@ -148,7 +148,7 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 | `GET /v1/config`, `PUT /v1/config` | read or replace the configuration (`{"yaml": "..."}`); a change that needs a migration is refused with its plan unless `"migrate": true` is sent |
 | `POST /v1/migration` | `{"yaml": "...", "dry_run": true}` returns the migration plan for a new config; `"dry_run": false` applies it |
 | `GET /v1/migration`, `POST /v1/migration/resume` | journal of the last or current migration; finish an interrupted one |
-| `GET /v1/events?since=N&wait=S` | event stream by long polling: events after sequence `N`, waiting up to `S` seconds |
+| `GET /v1/events?since=N&wait=S&stream=ID` | event stream by long polling: events after sequence `N`, waiting up to `S` seconds; the response says when `N` is older than the retained backlog (`gap`) |
 | `GET /v1/audit?limit=N` | automatic changes |
 | `GET /v1/templates` | template names |
 
@@ -211,6 +211,7 @@ simpletickets migrate status
 ## Documentation
 
 - [Specification](docs/spec.md)
+- [HTTP API and event contract](docs/api.md)
 - [Design review](docs/design-review.md)
 
 ## License

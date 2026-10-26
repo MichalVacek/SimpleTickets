@@ -144,6 +144,9 @@ pub struct DaemonArgs {
     /// Hours between update checks
     #[arg(long, default_value_t = 24)]
     pub update_interval_hours: u64,
+    /// Events the event stream keeps for clients that poll late
+    #[arg(long, default_value_t = crate::events::DEFAULT_BACKLOG)]
+    pub event_backlog: usize,
     /// Log level: error, warn, info or debug (default: $SIMPLETICKETS_LOG_LEVEL or info)
     #[arg(long)]
     pub log_level: Option<String>,
@@ -433,6 +436,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                 check.interval = Duration::from_secs(args.update_interval_hours.max(1) * 3600);
                 options.update_check = Some(check);
             }
+            options.event_backlog = args.event_backlog.max(1);
             options.logger = Arc::new(make_logger(args.log_level, args.log_file)?);
             let running = crate::daemon::start(options)?;
             println!("listening on http://{}/v1", running.addr);

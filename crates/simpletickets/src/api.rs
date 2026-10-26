@@ -512,10 +512,26 @@ fn start_migration(shared: &Shared, req: &Request) -> Reply {
 fn events(shared: &Shared, req: &Request) -> Reply {
     let since = num_param(req, "since").unwrap_or(0);
     let wait = num_param(req, "wait").unwrap_or(0).min(MAX_WAIT_SECONDS);
-    let (events, next) = shared
+    let stream = req
+        .query
+        .iter()
+        .find(|(k, _)| k == "stream")
+        .map(|(_, v)| v.as_str());
+    let page = shared
         .events
-        .since(since, Duration::from_secs(wait), &shared.stop);
-    reply(200, json!({"events": events, "next": next}))
+        .since(since, stream, Duration::from_secs(wait), &shared.stop);
+    reply(
+        200,
+        json!({
+            "events": page.events,
+            "next": page.next,
+            "oldest": page.oldest,
+            "latest": page.latest,
+            "gap": page.gap.is_some(),
+            "gap_reason": page.gap.map(|g| g.key()),
+            "stream": page.stream,
+        }),
+    )
 }
 
 #[cfg(test)]
