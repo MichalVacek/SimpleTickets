@@ -63,10 +63,28 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 | `PATCH /v1/tickets/{id}` | update; `null` clears `priority`, `due`, `parent` |
 | `POST /v1/rescan` | scan and run the rules now |
 | `GET /v1/doctor` | consistency report |
-| `GET /v1/config`, `PUT /v1/config` | read or replace the configuration (`{"yaml": "..."}`) |
+| `GET /v1/config`, `PUT /v1/config` | read or replace the configuration (`{"yaml": "..."}`); a change that needs a migration is refused with its plan unless `"migrate": true` is sent |
+| `POST /v1/migration` | `{"yaml": "...", "dry_run": true}` returns the migration plan for a new config; `"dry_run": false` applies it |
+| `GET /v1/migration`, `POST /v1/migration/resume` | journal of the last or current migration; finish an interrupted one |
 | `GET /v1/events?since=N&wait=S` | event stream by long polling: events after sequence `N`, waiting up to `S` seconds |
 | `GET /v1/audit?limit=N` | automatic changes |
 | `GET /v1/templates` | template names |
+
+## Migration
+
+Changing `parent_folder`, `subticket_folder` or the status mapping can require moving files or rewriting statuses. A migration is planned first (dry run), then applied through a journal in `.simpletickets/migration.json` that is saved after every step. Steps are idempotent, so an interrupted migration is finished with `migrate resume` (the daemon does this on startup). The new config file is written last. Ticket IDs never change and links are IDs, so they stay valid; a check after completion confirms that no ticket disappeared and no link broke.
+
+```
+simpletickets migrate plan new-config.yml     # show the steps, change nothing
+simpletickets migrate apply new-config.yml    # journaled apply, then install the config
+simpletickets migrate resume
+simpletickets migrate status
+```
+
+- Tickets inside the old parent or sub-ticket folder move to the new folder of the same kind, keeping their relative path. Moves that would overwrite a file or leave every scanned folder are reported as conflicts and skipped.
+- A status removed from the mapping is replaced by the first status of its old category.
+- A step whose file changed since the plan is skipped rather than overwritten; a step that fails (locked or read-only file) is retried by `migrate resume`.
+- The daemon only suggests a migration (`migration.suggested` event) when the config file is edited by hand.
 
 ## Documentation
 

@@ -327,3 +327,151 @@ fn periodic_scan_runs_rules_on_hand_edited_files() {
         || api.get("/v1/tickets/P").1["status"] == "in-progress"
     ));
 }
+
+const OLD_CONFIG: &str = "parent_folder: specs\nsubticket_folder: work\n";
+const NEW_CONFIG: &str = "parent_folder: plans\nsubticket_folder: tasks\n\
+statuses:\n  todo: [todo]\n  in-progress: [doing]\n  done: [done]\n  cancelled: [cancelled]\n";
+
+fn migration_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write(d, "simpletickets.yml", OLD_CONFIG);
+    write(d, "specs/P-1.md", &ticket_text("P-1", "todo", ""));
+    write(
+        d,
+        "work/T-1.md",
+        &ticket_text("T-1", "in-progress", "parent: P-1\n"),
+    );
+    write(
+        d,
+        "work/T-2.md",
+        &ticket_text("T-2", "todo", "parent: P-1\nblocked_by: [T-1]\n"),
+    );
+    dir
+}
+
+#[test]
+fn config_change_needing_migration_is_refused_then_dry_run_then_applied() {
+    let dir = migration_project();
+    let d = dir.path();
+    let api = start(d, false, SLOW);
+    let put = |migrate: bool| {
+        api.call(
+            "PUT",
+            "/v1/config",
+            Some(&json!({"yaml": NEW_CONFIG, "migrate": migrate}).to_string()),
+        )
+    };
+
+    let (status, refused) = put(false);
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["plan"]["actions"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        std::fs::read_to_string(d.join("simpletickets.yml")).unwrap(),
+        OLD_CONFIG
+    );
+
+    let (status, dry) = api.post("/v1/migration", &json!({"yaml": NEW_CONFIG}).to_string());
+    assert_eq!(status, 200, "{dry}");
+    assert_eq!(dry["dry_run"], true);
+    assert!(d.join("specs/P-1.md").exists(), "dry run moved nothing");
+    assert!(api.get("/v1/migration").1["journal"].is_null());
+
+    let (status, done) = api.post(
+        "/v1/migration",
+        &json!({"yaml": NEW_CONFIG, "dry_run": false}).to_string(),
+    );
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["journal"]["state"], "complete");
+    assert_eq!(done["journal"]["integrity"]["ok"], true);
+    assert!(d.join("plans/P-1.md").exists() && d.join("tasks/T-2.md").exists());
+    assert!(!d.join("specs/P-1.md").exists());
+    assert!(api.get("/v1/config").1["config"]["parent_folder"]
+        .as_str()
+        .unwrap()
+        .ends_with("plans"));
+    assert_eq!(api.get("/v1/tickets/T-1").1["status"], "doing");
+    assert_eq!(api.get("/v1/tickets/T-2").1["blocked_by"][0], "T-1");
+    assert_eq!(api.get("/v1/doctor").1["clean"], true);
+    assert_eq!(api.get("/v1/migration").1["journal"]["state"], "complete");
+}
+
+#[test]
+fn put_config_with_migrate_flag_applies_the_migration() {
+    let dir = migration_project();
+    let api = start(dir.path(), false, SLOW);
+    let body = json!({"yaml": NEW_CONFIG, "migrate": true}).to_string();
+    let (status, applied) = api.call("PUT", "/v1/config", Some(&body));
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["journal"]["state"], "complete");
+    assert!(dir.path().join("plans/P-1.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("simpletickets.yml")).unwrap(),
+        NEW_CONFIG
+    );
+    let events = api.get("/v1/events").1.to_string();
+    assert!(events.contains("migration.finished"));
+}
+
+#[test]
+fn daemon_resumes_an_interrupted_migration_on_startup() {
+    use simpletickets_core::config::Config;
+    use simpletickets_core::migration::{self, JournalState, RunOptions};
+    use simpletickets_core::store::Store;
+
+    let dir = migration_project();
+    let d = dir.path().canonicalize().unwrap();
+    let store = Store::scan(&Config::load_from_dir(&d).unwrap());
+    let journal = migration::begin(&d, &store, NEW_CONFIG).unwrap();
+    let partial = migration::run(&d, journal, RunOptions { max_steps: Some(2) }).unwrap();
+    assert_eq!(partial.state, JournalState::Applying);
+    assert_eq!(
+        std::fs::read_to_string(d.join("simpletickets.yml")).unwrap(),
+        OLD_CONFIG
+    );
+
+    let api = start(&d, false, SLOW);
+    assert_eq!(
+        std::fs::read_to_string(d.join("simpletickets.yml")).unwrap(),
+        NEW_CONFIG
+    );
+    assert_eq!(api.get("/v1/migration").1["journal"]["state"], "complete");
+    assert_eq!(api.get("/v1/tickets/T-1").1["status"], "doing");
+    assert!(d.join("plans/P-1.md").exists() && d.join("tasks/T-1.md").exists());
+    assert_eq!(api.get("/v1/doctor").1["clean"], true);
+    assert_eq!(api.post("/v1/migration/resume", "").0, 404);
+}
+
+#[test]
+fn migration_endpoints_validate_input() {
+    let dir = migration_project();
+    let api = start(dir.path(), false, SLOW);
+    assert_eq!(
+        api.post("/v1/migration", r#"{"yaml":"id_prefix: a-b\n"}"#)
+            .0,
+        400
+    );
+    assert_eq!(api.post("/v1/migration", "{}").0, 400);
+    assert_eq!(api.call("DELETE", "/v1/migration", None).0, 405);
+    let same = json!({"yaml": OLD_CONFIG, "dry_run": true}).to_string();
+    let (_, plan) = api.post("/v1/migration", &same);
+    assert!(plan["plan"]["actions"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn hand_edited_config_suggests_a_migration_event() {
+    let dir = migration_project();
+    let api = start(dir.path(), false, Duration::from_millis(500));
+    std::fs::write(dir.path().join("simpletickets.yml"), NEW_CONFIG).unwrap();
+    let seen = wait_for(|| {
+        api.get("/v1/events")
+            .1
+            .to_string()
+            .contains("migration.suggested")
+    });
+    assert!(seen);
+    assert!(
+        dir.path().join("specs/P-1.md").exists(),
+        "nothing moves without an explicit apply"
+    );
+}

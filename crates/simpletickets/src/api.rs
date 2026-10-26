@@ -4,6 +4,7 @@ use crate::daemon::{Inner, Shared};
 use serde_json::{json, Value};
 use simpletickets_core::config::{self, Config};
 use simpletickets_core::doctor;
+use simpletickets_core::migration::{self, MigrationError};
 use simpletickets_core::ops::{self, NewTicket, OpError, Update};
 use simpletickets_core::query::{self, Filter};
 use simpletickets_core::templates;
@@ -201,7 +202,19 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
         }
         (["v1", "config"], "GET") => get_config(shared),
         (["v1", "config"], "PUT") => put_config(shared, req),
-        (["v1", "migration"], "POST") => error(501, "migration is not available yet"),
+        (["v1", "migration"], "GET") => match migration::load(&shared.dir) {
+            Ok(journal) => reply(200, json!({"journal": journal})),
+            Err(e) => migration_error(&e),
+        },
+        (["v1", "migration"], "POST") => start_migration(shared, req),
+        (["v1", "migration", "resume"], "POST") => {
+            let mut inner = shared.lock();
+            match shared.resume_migration(&mut inner) {
+                Ok(Some(journal)) => reply(200, json!({"journal": journal})),
+                Ok(None) => error(404, "no unfinished migration"),
+                Err(e) => migration_error(&e),
+            }
+        }
         (["v1", "events"], "GET") => events(shared, req),
         (["v1", "audit"], "GET") => {
             let limit = num_param(req, "limit").unwrap_or(100) as usize;
@@ -211,6 +224,7 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
         (
             ["v1", "health" | "parents" | "tickets" | "rescan" | "doctor" | "config" | "migration"
             | "events" | "audit" | "templates"]
+            | ["v1", "migration", "resume"]
             | ["v1", "tickets", _],
             _,
         ) => error(405, "method not allowed"),
@@ -304,25 +318,90 @@ fn get_config(shared: &Shared) -> Reply {
     reply(200, json!({"yaml": yaml, "config": inner.config.to_json()}))
 }
 
+fn migration_error(e: &MigrationError) -> Reply {
+    let status = match e {
+        MigrationError::Busy => 409,
+        MigrationError::Config(_) => 400,
+        MigrationError::Journal { .. } => 500,
+    };
+    error(status, e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigBody {
+    yaml: String,
+    /// Apply the migration the change requires instead of refusing.
+    #[serde(default)]
+    migrate: bool,
+}
+
+/// Replaces the config. A change that needs a migration is refused with the
+/// plan unless `migrate` is set, in which case the migration applies it.
 fn put_config(shared: &Shared, req: &Request) -> Reply {
+    let body: ConfigBody = match parse_body(req) {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let new = match Config::parse(&body.yaml, &shared.dir) {
+        Ok(c) => c,
+        Err(e) => return error(400, e.to_string()),
+    };
+    let mut inner = shared.lock();
+    match migration::load(&shared.dir) {
+        Ok(Some(j)) if !j.is_complete() => return migration_error(&MigrationError::Busy),
+        Err(e) => return migration_error(&e),
+        _ => {}
+    }
+    let plan = migration::plan(&inner.store, &new);
+    if plan.is_empty() {
+        if let Err(e) = config::write_file(&shared.dir, &body.yaml) {
+            return error(500, format!("cannot write config: {e}"));
+        }
+        shared.rescan_locked(&mut inner, "config");
+        return reply(200, json!({"config": inner.config.to_json()}));
+    }
+    if !body.migrate {
+        return reply(
+            409,
+            json!({"error": "the change requires a migration; resend with \"migrate\": true", "plan": plan}),
+        );
+    }
+    match shared.migrate(&mut inner, &body.yaml) {
+        Ok(journal) => reply(
+            200,
+            json!({"config": inner.config.to_json(), "journal": journal}),
+        ),
+        Err(e) => migration_error(&e),
+    }
+}
+
+/// Dry-runs (the default) or applies a migration to the config in `yaml`
+/// without going through `PUT /v1/config`.
+fn start_migration(shared: &Shared, req: &Request) -> Reply {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Body {
         yaml: String,
+        dry_run: Option<bool>,
     }
     let body: Body = match parse_body(req) {
         Ok(b) => b,
         Err(r) => return r,
     };
-    if let Err(e) = Config::parse(&body.yaml, &shared.dir) {
-        return error(400, e.to_string());
-    }
+    let new = match Config::parse(&body.yaml, &shared.dir) {
+        Ok(c) => c,
+        Err(e) => return error(400, e.to_string()),
+    };
     let mut inner = shared.lock();
-    if let Err(e) = config::write_file(&shared.dir, &body.yaml) {
-        return error(500, format!("cannot write config: {e}"));
+    if body.dry_run.unwrap_or(true) {
+        let plan = migration::plan(&inner.store, &new);
+        return reply(200, json!({"dry_run": true, "plan": plan}));
     }
-    shared.rescan_locked(&mut inner, "config");
-    reply(200, json!({"config": inner.config.to_json()}))
+    match shared.migrate(&mut inner, &body.yaml) {
+        Ok(journal) => reply(200, json!({"dry_run": false, "journal": journal})),
+        Err(e) => migration_error(&e),
+    }
 }
 
 fn events(shared: &Shared, req: &Request) -> Reply {

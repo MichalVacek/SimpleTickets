@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
 use simpletickets_core::config::Config;
 use simpletickets_core::doctor;
+use simpletickets_core::migration::{self, Journal, JournalState};
 use simpletickets_core::ops::{self, NewTicket, Role, Update};
 use simpletickets_core::query::{self, Filter};
 use simpletickets_core::rules::{self, RunOptions, RunReport};
@@ -62,6 +63,37 @@ pub enum Command {
     Templates,
     /// Run the background daemon with the local API
     Daemon(DaemonArgs),
+    /// Move tickets and rewrite statuses for a new configuration
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MigrateCommand {
+    /// Show what changing to the given config file would do, without changing anything
+    Plan {
+        config: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply the migration to the given config file, then install it as the config
+    Apply {
+        config: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Finish an interrupted migration
+    Resume {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the last or current migration
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -305,6 +337,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             running.wait();
             Ok(ExitCode::SUCCESS)
         }
+        Command::Migrate { command } => migrate(&ctx, command),
         Command::Templates => {
             for name in templates::list(&ctx.dir) {
                 println!("{name}");
@@ -423,4 +456,102 @@ fn show(ctx: &Context, id: &str, json: bool) -> Result<ExitCode, String> {
     println!("path:      {}", text("path"));
     print!("\n{}", v["body"].as_str().unwrap_or(""));
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_journal(journal: &Journal, json: bool) {
+    if json {
+        println!("{}", json!(journal));
+        return;
+    }
+    for step in &journal.steps {
+        let note = step
+            .note
+            .as_deref()
+            .map_or(String::new(), |n| format!(" ({n})"));
+        println!(
+            "{:?}: {}{note}",
+            step.state,
+            migration::describe(&step.action)
+        );
+    }
+    for c in &journal.conflicts {
+        println!("conflict {}: {}", c.id, c.message);
+    }
+    println!("migration {:?}", journal.state);
+    if let Some(i) = &journal.integrity {
+        println!(
+            "integrity: {} (missing ids: {}, broken links {} -> {})",
+            if i.ok { "ok" } else { "FAILED" },
+            i.missing_ids.len(),
+            i.missing_targets_before,
+            i.missing_targets_after
+        );
+    }
+}
+
+fn migrate(ctx: &Context, command: MigrateCommand) -> Result<ExitCode, String> {
+    let read = |path: &PathBuf| {
+        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let finish = |journal: Journal, json: bool| {
+        print_journal(&journal, json);
+        let ok = journal.state == JournalState::Complete
+            && journal.integrity.as_ref().map_or(true, |i| i.ok);
+        Ok(if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        })
+    };
+    match command {
+        MigrateCommand::Plan { config, json } => {
+            let text = read(&config)?;
+            let new = Config::parse(&text, &ctx.dir).map_err(|e| e.to_string())?;
+            let plan = migration::plan(&ctx.scan(), &new);
+            if json {
+                println!("{}", json!(plan));
+            } else if plan.is_empty() {
+                println!("no migration needed");
+            } else {
+                for a in &plan.actions {
+                    println!("{}", migration::describe(a));
+                }
+                for c in &plan.conflicts {
+                    println!("conflict {}: {}", c.id, c.message);
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        MigrateCommand::Apply { config, json } => {
+            let text = read(&config)?;
+            let journal =
+                migration::begin(&ctx.dir, &ctx.scan(), &text).map_err(|e| e.to_string())?;
+            let journal = migration::run(&ctx.dir, journal, migration::RunOptions::default())
+                .map_err(|e| e.to_string())?;
+            finish(journal, json)
+        }
+        MigrateCommand::Resume { json } => {
+            match migration::resume(&ctx.dir, migration::RunOptions::default())
+                .map_err(|e| e.to_string())?
+            {
+                Some(journal) => finish(journal, json),
+                None => {
+                    println!("no unfinished migration");
+                    Ok(ExitCode::SUCCESS)
+                }
+            }
+        }
+        MigrateCommand::Status { json } => {
+            match migration::load(&ctx.dir).map_err(|e| e.to_string())? {
+                Some(journal) => {
+                    print_journal(&journal, json);
+                    Ok(ExitCode::SUCCESS)
+                }
+                None => {
+                    println!("no migration recorded");
+                    Ok(ExitCode::SUCCESS)
+                }
+            }
+        }
+    }
 }

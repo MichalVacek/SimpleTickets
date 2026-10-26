@@ -6,6 +6,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
 use simpletickets_core::config::{Config, CONFIG_FILE};
+use simpletickets_core::migration::{self, Journal, MigrationError};
 use simpletickets_core::rules::{self, RunOptions};
 use simpletickets_core::state::{audit_log_path, ensure_state_dir, token_path, STATE_DIR};
 use simpletickets_core::store::Store;
@@ -149,10 +150,17 @@ impl Shared {
         let mut outcome = ScanOutcome::default();
         match Config::load_from_dir(&self.dir) {
             Ok(config) if config != inner.config => {
+                let plan = migration::plan(&inner.store, &config);
                 inner.config = config;
                 outcome.config_changed = true;
                 self.events
                     .publish("config.changed", json!({"reason": reason}));
+                if !plan.is_empty() {
+                    self.events.publish(
+                        "migration.suggested",
+                        json!({"actions": plan.actions.len(), "conflicts": plan.conflicts.len()}),
+                    );
+                }
             }
             Ok(_) => {}
             Err(e) => self
@@ -188,6 +196,40 @@ impl Shared {
         );
         inner.store = store;
         (summary, outcome)
+    }
+}
+
+impl Shared {
+    /// Plans, journals and applies a migration to the config in `yaml`, then rescans.
+    pub fn migrate(&self, inner: &mut Inner, yaml: &str) -> Result<Journal, MigrationError> {
+        let journal = migration::begin(&self.dir, &inner.store, yaml)?;
+        self.events.publish(
+            "migration.started",
+            json!({"steps": journal.steps.len(), "conflicts": journal.conflicts.len()}),
+        );
+        let journal = migration::run(&self.dir, journal, migration::RunOptions::default())?;
+        self.after_migration(inner, &journal);
+        Ok(journal)
+    }
+
+    /// Resumes an unfinished migration; `None` when there is nothing to resume.
+    pub fn resume_migration(&self, inner: &mut Inner) -> Result<Option<Journal>, MigrationError> {
+        let journal = migration::resume(&self.dir, migration::RunOptions::default())?;
+        if let Some(j) = &journal {
+            self.after_migration(inner, j);
+        }
+        Ok(journal)
+    }
+
+    fn after_migration(&self, inner: &mut Inner, journal: &Journal) {
+        self.events.publish("migration.finished", journal.summary());
+        if journal.is_complete() {
+            if let Ok(config) = Config::load_from_dir(&self.dir) {
+                inner.store = Store::scan(&config);
+                inner.config = config;
+            }
+        }
+        self.rescan_locked(inner, "migration");
     }
 }
 
@@ -234,6 +276,7 @@ pub fn start(options: Options) -> Result<Running, String> {
         .canonicalize()
         .map_err(|e| format!("{}: {e}", options.dir.display()))?;
     ensure_state_dir(&dir).map_err(|e| format!("cannot create state folder: {e}"))?;
+    let resumed = migration::resume(&dir, migration::RunOptions::default());
     let config = Config::load_from_dir(&dir).map_err(|e| e.to_string())?;
     let token_file = options
         .token_file
@@ -254,6 +297,15 @@ pub fn start(options: Options) -> Result<Running, String> {
             config,
         }),
     });
+    match resumed {
+        Ok(Some(journal)) => shared
+            .events
+            .publish("migration.finished", journal.summary()),
+        Ok(None) => {}
+        Err(e) => shared
+            .events
+            .publish("migration.error", json!({"message": e.to_string()})),
+    }
     shared.rescan("startup");
 
     let server = tiny_http::Server::http(SocketAddr::new(BIND_ADDRESS, options.port))

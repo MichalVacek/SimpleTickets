@@ -174,3 +174,34 @@ fn copy_dir(from: &Path, to: &Path) {
         }
     }
 }
+
+#[test]
+fn migrate_plan_apply_status_and_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::create_dir_all(d.join("specs")).unwrap();
+    std::fs::write(d.join("simpletickets.yml"), "parent_folder: specs\n").unwrap();
+    std::fs::write(
+        d.join("specs/P-1.md"),
+        "---\nid: P-1\ntitle: P\nstatus: todo\n---\n",
+    )
+    .unwrap();
+    let new = d.join("new.yml");
+    std::fs::write(&new, "parent_folder: plans\n").unwrap();
+    let new = new.to_str().unwrap();
+
+    assert!(ok(d, &["migrate", "plan", new]).contains("move P-1"));
+    assert!(d.join("specs/P-1.md").exists());
+    assert!(ok(d, &["migrate", "status"]).contains("no migration recorded"));
+    assert!(ok(d, &["migrate", "resume"]).contains("no unfinished"));
+
+    let out = ok(d, &["migrate", "apply", new]);
+    assert!(
+        out.contains("migration Complete") && out.contains("integrity: ok"),
+        "{out}"
+    );
+    assert!(d.join("plans/P-1.md").exists());
+    assert!(ok(d, &["show", "P-1"]).contains("plans"));
+    assert!(ok(d, &["migrate", "plan", new]).contains("no migration needed"));
+    assert!(ok(d, &["migrate", "status", "--json"]).contains("\"complete\""));
+}
