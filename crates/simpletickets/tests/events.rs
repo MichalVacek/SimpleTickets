@@ -142,6 +142,8 @@ fn the_watcher_publishes_ticket_events_for_hand_edits() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "a.md", &ticket_text("A", "todo", ""));
     let api = start(dir.path(), true, SLOW);
+    // The watcher is set up on the scheduler thread just after the daemon starts.
+    std::thread::sleep(Duration::from_millis(500));
     let since = latest(&api);
     write(dir.path(), "a.md", &ticket_text("A", "in-progress", ""));
     assert!(wait_for(|| {
