@@ -101,6 +101,9 @@ pub struct DaemonArgs {
     /// Port on 127.0.0.1
     #[arg(long, default_value_t = crate::daemon::DEFAULT_PORT)]
     pub port: u16,
+    /// Listen on all interfaces; only for use inside a container (see the README)
+    #[arg(long)]
+    pub bind_all: bool,
     /// Seconds between periodic scans
     #[arg(long, default_value_t = 60)]
     pub scan_interval: u64,
@@ -110,6 +113,12 @@ pub struct DaemonArgs {
     /// Do not watch files; rely on periodic scans
     #[arg(long)]
     pub no_watch: bool,
+    /// Detect file changes by polling instead of file events (for Docker bind mounts)
+    #[arg(long, conflicts_with = "no_watch")]
+    pub poll: bool,
+    /// Seconds between polls with --poll
+    #[arg(long, default_value_t = 2)]
+    pub poll_interval: u64,
     /// Do not check GitHub for newer releases
     #[arg(long)]
     pub no_update_check: bool,
@@ -334,9 +343,13 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
         Command::Daemon(args) => {
             let mut options = crate::daemon::Options::new(ctx.dir.clone());
             options.port = args.port;
+            options.bind_all = args.bind_all;
             options.scan_interval = Duration::from_secs(args.scan_interval.max(1));
             options.token_file = args.token_file;
             options.watch = !args.no_watch;
+            options.poll_interval = args
+                .poll
+                .then(|| Duration::from_secs(args.poll_interval.max(1)));
             if !args.no_update_check {
                 let mut check = crate::update::UpdateCheck::github();
                 check.interval = Duration::from_secs(args.update_interval_hours.max(1) * 3600);

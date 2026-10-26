@@ -78,6 +78,8 @@ plugins/
 - Event stream contract and API versioning (slice 8 starts at `/v1`).
 - Plugin discovery and supervision (the MCP plugin is started by its client; supervision comes later).
 - Linux and Windows packaging after the macOS installer.
+- Release archives: the installer's download mode expects `simpletickets-<arch>-apple-darwin.tar.gz` assets, but no release workflow publishes them yet.
+- The Docker image listens on all interfaces inside the container (`--bind-all`); revisit if a safer way to reach the API from the host is wanted.
 
 ## Testing checklist
 

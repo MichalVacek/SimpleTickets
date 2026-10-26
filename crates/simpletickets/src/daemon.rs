@@ -3,7 +3,7 @@
 use crate::api;
 use crate::token;
 use crate::update::{self, Release, UpdateCheck};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{PollWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
 use simpletickets_core::config::{Config, CONFIG_FILE};
@@ -34,10 +34,16 @@ const RETRY_AFTER: Duration = Duration::from_secs(3);
 pub struct Options {
     pub dir: PathBuf,
     pub port: u16,
+    /// Listen on every interface instead of loopback. Only for containers whose published
+    /// port is itself restricted to the host's loopback.
+    pub bind_all: bool,
     pub scan_interval: Duration,
     /// Token file; defaults to the state folder.
     pub token_file: Option<PathBuf>,
     pub watch: bool,
+    /// Detect changes by polling at this interval instead of native file events, for
+    /// folders where those are not delivered (bind mounts, network shares).
+    pub poll_interval: Option<Duration>,
     /// Periodic check for a newer release; `None` disables it.
     pub update_check: Option<UpdateCheck>,
 }
@@ -47,9 +53,11 @@ impl Options {
         Options {
             dir,
             port: DEFAULT_PORT,
+            bind_all: false,
             scan_interval: Duration::from_secs(60),
             token_file: None,
             watch: true,
+            poll_interval: None,
             update_check: None,
         }
     }
@@ -323,8 +331,13 @@ pub fn start(options: Options) -> Result<Running, String> {
     }
     shared.rescan("startup");
 
-    let server = tiny_http::Server::http(SocketAddr::new(BIND_ADDRESS, options.port))
-        .map_err(|e| format!("cannot listen on {BIND_ADDRESS}:{}: {e}", options.port))?;
+    let bind = if options.bind_all {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        BIND_ADDRESS
+    };
+    let server = tiny_http::Server::http(SocketAddr::new(bind, options.port))
+        .map_err(|e| format!("cannot listen on {bind}:{}: {e}", options.port))?;
     let addr = match server.server_addr() {
         tiny_http::ListenAddr::IP(addr) => addr,
         #[allow(unreachable_patterns)]
@@ -342,9 +355,9 @@ pub fn start(options: Options) -> Result<Running, String> {
     *shared.scheduler.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx.clone());
     {
         let (shared, tx) = (shared.clone(), tx.clone());
-        let (interval, watch) = (options.scan_interval, options.watch);
+        let (interval, watch, poll) = (options.scan_interval, options.watch, options.poll_interval);
         threads.push(thread::spawn(move || {
-            schedule(&shared, &rx, &tx, interval, watch)
+            schedule(&shared, &rx, &tx, interval, watch, poll)
         }));
     }
     if let Some(check) = options.update_check.clone() {
@@ -386,8 +399,9 @@ fn schedule(
     tx: &Sender<Message>,
     interval: Duration,
     watch: bool,
+    poll: Option<Duration>,
 ) {
-    let mut watcher = watch.then(|| make_watcher(&shared.lock().config, &shared.dir, tx));
+    let mut watcher = watch.then(|| make_watcher(&shared.lock().config, &shared.dir, tx, poll));
     let mut deadline = Instant::now() + interval;
     loop {
         let timeout = deadline.saturating_duration_since(Instant::now());
@@ -416,23 +430,38 @@ fn schedule(
         let (_, outcome) = shared.rescan(reason);
         deadline = Instant::now() + if outcome.retry { RETRY_AFTER } else { interval };
         if outcome.config_changed && watcher.is_some() {
-            watcher = Some(make_watcher(&shared.lock().config, &shared.dir, tx));
+            watcher = Some(make_watcher(&shared.lock().config, &shared.dir, tx, poll));
         }
     }
 }
 
-/// Watches the roots, auto-scan folders and the config folder. A failing watch is
-/// not fatal: the periodic scan still finds changes.
-fn make_watcher(config: &Config, dir: &Path, tx: &Sender<Message>) -> Option<RecommendedWatcher> {
+/// Watches the roots, auto-scan folders and the config folder, with native file events
+/// or, when `poll` is set, by polling. A failing watch is not fatal: the periodic scan
+/// still finds changes.
+fn make_watcher(
+    config: &Config,
+    dir: &Path,
+    tx: &Sender<Message>,
+    poll: Option<Duration>,
+) -> Option<Box<dyn Watcher + Send>> {
     let sender = tx.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+    let handler = move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event {
             if event.paths.iter().any(|p| is_relevant(p)) {
                 let _ = sender.send(Message::Changed);
             }
         }
-    })
-    .ok()?;
+    };
+    let mut watcher: Box<dyn Watcher + Send> = match poll {
+        Some(interval) => Box::new(
+            PollWatcher::new(
+                handler,
+                notify::Config::default().with_poll_interval(interval),
+            )
+            .ok()?,
+        ),
+        None => Box::new(notify::recommended_watcher(handler).ok()?),
+    };
     let folders = config
         .roots
         .iter()

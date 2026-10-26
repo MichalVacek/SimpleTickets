@@ -2,7 +2,7 @@
 
 A lightweight, local-first ticketing app. Tickets are plain Markdown files in a folder tree, much like an Obsidian vault. A small background daemon keeps them consistent and exposes a local API. Everything beyond ticket management is a plugin.
 
-Status: early development. The command line, daemon, local API, update check and MCP plugin work.
+Status: v0.1 scope is complete: the core (command line, daemon, local API, rules, migration, update check) and a minimal MCP plugin work end to end, with a macOS installer and a Docker image. Still to come: UI, sync to other trackers, Linux and Windows packaging, signed releases.
 
 ## Goals
 
@@ -11,7 +11,7 @@ Status: early development. The command line, daemon, local API, update check and
 - Relations between tickets: parent, blocked by, related.
 - Automatic rules: finishing a ticket unblocks the tickets it blocks; starting a sub-ticket marks its parent in progress.
 - Local HTTP API (localhost only, token protected) for listing, creating and updating tickets.
-- Runs natively on Mac, Windows and Linux, or in Docker.
+- Runs natively on Mac (installer provided) or in Docker; Windows and Linux packaging is planned.
 - UI, MCP server and sync to other trackers are plugins.
 
 ## Repository layout
@@ -19,6 +19,8 @@ Status: early development. The command line, daemon, local API, update check and
 | Path | Contents |
 |---|---|
 | `docs/` | Specification and design review |
+| `scripts/` | macOS installer |
+| `Dockerfile` | Container image |
 | `crates/` | Rust crates for the core |
 | `plugins/` | Out-of-process plugins |
 | `examples/tickets/` | Sample ticket folder |
@@ -45,11 +47,36 @@ simpletickets templates
 - Custom templates are Markdown files in `.simpletickets/templates/NAME.md` using `{{title}}`, `{{id}}` and `{{date}}`.
 - `doctor` exits non-zero when it finds duplicate IDs, malformed frontmatter, missing link targets, cycles or orphans.
 
+## Install (macOS)
+
+```
+scripts/install.sh                 # asks which addons to include
+scripts/install.sh --yes --addons mcp
+scripts/install.sh --dry-run       # print the plan and the launchd plist, change nothing
+```
+
+The installer builds from this checkout when `cargo` is available (otherwise it downloads the latest release archive, which only works once a release has been published), copies the binaries to `~/.local/bin`, creates the tickets folder (`~/SimpleTickets`), writes `~/Library/LaunchAgents/com.simpletickets.daemon.plist` and offers to load it so the daemon runs at login. Logs go to `~/Library/Logs/SimpleTickets/daemon.log`. Options: `--prefix`, `--tickets-dir`, `--port`, `--addons mcp|none`, `--from-source`, `--from-release`, `--launchagents-dir`, `--no-service`, `--no-load`, `--yes`. To remove the service: `launchctl bootout gui/$(id -u)/com.simpletickets.daemon` and delete the plist.
+
+New addons are one line in the `ADDONS` list at the top of the script: name, crate, binary and description.
+
+## Docker
+
+```
+docker build -t simpletickets .
+docker run -d --name simpletickets -v ~/tickets:/data -p 127.0.0.1:7878:7878 simpletickets
+cat ~/tickets/.simpletickets/token       # the API token
+docker exec -i simpletickets simpletickets-mcp --dir /data    # MCP server inside the container
+```
+
+The container runs `simpletickets --dir /data daemon --bind-all --poll`. Bind mounts often deliver no file events, so `--poll` (every 2 seconds, `--poll-interval`) detects changes by polling instead; use it for any folder on a network share or mount that misses events. `--bind-all` makes the daemon listen on all interfaces inside the container, which is what lets Docker publish the port; keep the `127.0.0.1:` prefix on `-p` so the API stays reachable from this machine only. The token still applies. The process runs as UID 1000; the mounted folder must be writable by it, or pass `--user $(id -u):$(id -g)`.
+
 ## Daemon and API
 
 ```
 simpletickets daemon --port 7878 --scan-interval 60
 ```
+
+Other flags: `--no-watch` (periodic scans only), `--poll` (see Docker), `--token-file`, `--no-update-check`.
 
 The daemon scans all folders on startup, watches them for changes, rescans periodically and runs the rules after each scan. The API listens on `127.0.0.1` only and requires `Authorization: Bearer <token>`. The token is generated on first run and stored in `.simpletickets/token` (owner-only permissions; `--token-file` overrides the location). Requests whose `Host` is not a localhost name are refused.
 

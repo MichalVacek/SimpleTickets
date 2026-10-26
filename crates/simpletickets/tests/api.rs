@@ -306,6 +306,20 @@ fn file_watcher_triggers_scan() {
 }
 
 #[test]
+fn poll_watcher_triggers_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let api = start_with(dir.path(), true, SLOW, |o| {
+        o.poll_interval = Some(Duration::from_millis(100));
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    write(dir.path(), "late.md", &ticket_text("LATE", "todo", ""));
+    assert!(
+        wait_for(|| api.get("/v1/tickets/LATE").0 == 200),
+        "polling did not pick up the new file"
+    );
+}
+
+#[test]
 fn periodic_scan_finds_new_files() {
     let dir = tempfile::tempdir().unwrap();
     let api = start(dir.path(), false, Duration::from_millis(500));
