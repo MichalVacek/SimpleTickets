@@ -404,13 +404,6 @@ impl Running {
         logger.info("stopped: lease released");
         logger.flush();
     }
-
-    /// Blocks until the daemon is stopped.
-    pub fn wait(self) {
-        for t in self.threads {
-            let _ = t.join();
-        }
-    }
 }
 
 pub fn start(options: Options) -> Result<Running, String> {

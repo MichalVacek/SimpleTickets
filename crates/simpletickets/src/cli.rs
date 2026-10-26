@@ -437,7 +437,16 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             let running = crate::daemon::start(options)?;
             println!("listening on http://{}/v1", running.addr);
             println!("token file: {}", running.token_file().display());
-            running.wait();
+            let (signal_tx, signal_rx) = std::sync::mpsc::channel();
+            ctrlc::set_handler(move || {
+                let _ = signal_tx.send(());
+            })
+            .map_err(|e| format!("cannot install the signal handler: {e}"))?;
+            // Blocks until SIGINT, SIGTERM or SIGHUP (Ctrl-C, Ctrl-Break or console close on
+            // Windows), then runs the normal stop path.
+            let _ = signal_rx.recv();
+            running.shared.logger.info("shutdown requested");
+            running.stop();
             Ok(ExitCode::SUCCESS)
         }
         Command::Migrate { command } => migrate(&ctx, command),
