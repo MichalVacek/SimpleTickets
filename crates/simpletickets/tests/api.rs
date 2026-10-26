@@ -152,6 +152,39 @@ fn create_update_and_filter() {
 }
 
 #[test]
+fn assignee_through_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("old.md"),
+        ticket_text("ST-1", "todo", "assignee: Ann\nteam: core\n"),
+    )
+    .unwrap();
+    let api = start(dir.path(), false, SLOW);
+    assert_eq!(api.get("/v1/tickets/ST-1").1["assignee"], "Ann");
+
+    let (status, created) = api.post("/v1/tickets", r#"{"title":"Mine","assignee":"Bob"}"#);
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["assignee"], "Bob");
+    let ids = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids(&api.get("/v1/tickets?assignee=bob").1), ["ST-2"]);
+    assert_eq!(ids(&api.get("/v1/tickets?assignee=ann").1), ["ST-1"]);
+    assert_eq!(ids(&api.get("/v1/tickets?field.assignee=Ann").1), ["ST-1"]);
+
+    let (status, updated) = api.patch("/v1/tickets/ST-2", r#"{"assignee":"Cy"}"#);
+    assert_eq!(status, 200, "{updated}");
+    assert_eq!(updated["assignee"], "Cy");
+    let (_, cleared) = api.patch("/v1/tickets/ST-2", r#"{"assignee":null}"#);
+    assert!(cleared["assignee"].is_null());
+    assert_eq!(api.patch("/v1/tickets/ST-2", r#"{"assignee":" "}"#).0, 400);
+}
+
+#[test]
 fn rejects_bad_requests() {
     let dir = tempfile::tempdir().unwrap();
     let api = start(dir.path(), false, SLOW);

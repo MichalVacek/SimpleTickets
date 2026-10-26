@@ -7,7 +7,7 @@ Status: v0.1 scope is complete: the core (command line, daemon, local API, rules
 ## Goals
 
 - Very small core, open source.
-- Tickets are Markdown with frontmatter: id, title, status, priority, due, tags and links.
+- Tickets are Markdown with frontmatter: id, title, status, priority, due, assignee, tags and links.
 - Relations between tickets: parent, blocked by, related.
 - Automatic rules: finishing a ticket unblocks the tickets it blocks; starting a sub-ticket marks its parent in progress.
 - Local HTTP API (localhost only, token protected) for listing, creating and updating tickets.
@@ -33,6 +33,10 @@ Build with `cargo build --release`; the binary is `target/release/simpletickets`
 simpletickets create "Write report" --priority high --due 2026-11-05 --tag work
 simpletickets create "Collect data" --parent ST-1 --blocked-by ST-2
 simpletickets list --status todo --tag work --blocked false --due-by today
+simpletickets create "Review" --assignee ann
+simpletickets assign ST-3 ann
+simpletickets unassign ST-3
+simpletickets list --assignee ann
 simpletickets list --field team=core --json
 simpletickets show ST-1
 simpletickets set-status ST-1 done
@@ -44,7 +48,8 @@ simpletickets templates
 ```
 
 - `create` picks the next ID (`ST-1`, `ST-2`, ...), renders the body from a template (`--template`, default `default`) and writes `ID-title.md`. With `parent_folder` and `subticket_folder` configured, `--role parent` and `--parent` choose the folder.
-- `list` filters: `--status`, `--category`, `--priority`, `--tag`, `--parent`, `--title`, `--blocked`, `--due-by`, `--field key=value`. Add `--json` for machine-readable output.
+- `list` filters: `--status`, `--category`, `--priority`, `--assignee`, `--tag`, `--parent`, `--title`, `--blocked`, `--due-by`, `--field key=value`. Add `--json` for machine-readable output.
+- The assignee is a core frontmatter key (`assignee: Ann`), a single line of text. `create --assignee`, `assign ID NAME` and `unassign ID` set and clear it; `list --assignee` matches case-insensitively and `list` shows it as `@name`. A top-level `assignee` text or number that already exists in a file is read as the core field, so `--field assignee=Ann` and files written before it became a core key keep working; an `assignee` of any other shape (a list, say) stays a free-form key.
 - `set-status`, `create` and `rescan` run the rules afterwards. A sub-ticket in progress sets its parent to in progress; a done (or, by default, cancelled) blocker stops blocking. Parents inside `parent_folder` are specification files: their state is derived and never written. Automatic changes are appended to `.simpletickets/audit.jsonl`; `rescan --dry-run` shows them without writing.
 - Custom templates are Markdown files in `.simpletickets/templates/NAME.md` using `{{title}}`, `{{id}}` and `{{date}}`.
 - `doctor` exits non-zero when it finds duplicate IDs, malformed frontmatter, missing link targets, cycles, orphans or an offline root. It also lists the rule warnings recorded by the last rule run (see below); warnings never change the exit code.
@@ -124,10 +129,10 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 |---|---|
 | `GET /v1/health` | version, `status` (`ok` or `degraded` while a root is offline), ticket and frozen counts, `offline_roots`, `rules_enabled` and `update` (`null`, or the newer release found by the update check) |
 | `GET /v1/parents` | parent tickets |
-| `GET /v1/tickets?status=&category=&priority=&tag=&parent=&title=&blocked=&due_by=&field.<key>=&limit=` | list and filter |
+| `GET /v1/tickets?status=&category=&priority=&assignee=&tag=&parent=&title=&blocked=&due_by=&field.<key>=&limit=` | list and filter |
 | `GET /v1/tickets/{id}` | one ticket with body and derived data |
-| `POST /v1/tickets` | create (`title`, `status`, `priority`, `due`, `tags`, `parent`, `blocked_by`, `related`, `template`, `body`, `role`) |
-| `PATCH /v1/tickets/{id}` | update; `null` clears `priority`, `due`, `parent` |
+| `POST /v1/tickets` | create (`title`, `status`, `priority`, `assignee`, `due`, `tags`, `parent`, `blocked_by`, `related`, `template`, `body`, `role`) |
+| `PATCH /v1/tickets/{id}` | update; `null` clears `priority`, `assignee`, `due`, `parent` |
 | `POST /v1/rescan` | scan and run the rules now |
 | `GET /v1/doctor` | consistency report: `clean`, `issues`, `tombstones` and the recorded rule `warnings` |
 | `GET /v1/tombstones`, `DELETE /v1/tombstones/{id}` | deleted tickets that are still referenced; acknowledge one |
@@ -153,10 +158,10 @@ Settings come from flags or `SIMPLETICKETS_URL`, `SIMPLETICKETS_TOKEN`, `SIMPLET
 
 | Tool | Purpose |
 |---|---|
-| `list_tickets` | filters: `status`, `category`, `priority`, `tag`, `parent`, `title`, `blocked`, `due_by`, `fields`, `limit` |
+| `list_tickets` | filters: `status`, `category`, `priority`, `assignee`, `tag`, `parent`, `title`, `blocked`, `due_by`, `fields`, `limit` |
 | `show_ticket` | one ticket with body and derived data |
 | `create_ticket` | `title` plus any of the other ticket fields, `body`, `template`, `role` (`parent` or `sub`) |
-| `update_ticket` | `id` plus the fields to change; `null` clears `priority`, `due`, `parent` |
+| `update_ticket` | `id` plus the fields to change; `null` clears `priority`, `assignee`, `due`, `parent` |
 | `next_ticket` | the first unblocked todo ticket matching the optional filters, ordered by `order` (default `due`, `priority`; `id` is also accepted). Tickets without a due date sort last; priorities rank critical, high, medium, low, then `P0`-style numbers, then the rest |
 
 API errors come back as tool errors, so a client sees the daemon's message (for example an unknown status).

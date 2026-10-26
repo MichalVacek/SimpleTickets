@@ -56,6 +56,7 @@ pub struct NewTicket {
     pub title: String,
     pub status: Option<String>,
     pub priority: Option<String>,
+    pub assignee: Option<String>,
     pub due: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -78,7 +79,7 @@ pub struct Created {
 }
 
 /// Changes to a ticket. Absent fields stay as they are; `null` clears
-/// `priority`, `due` and `parent`.
+/// `priority`, `assignee`, `due` and `parent`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Update {
@@ -86,6 +87,8 @@ pub struct Update {
     pub status: Option<String>,
     #[serde(default, deserialize_with = "nullable")]
     pub priority: Option<Option<String>>,
+    #[serde(default, deserialize_with = "nullable")]
+    pub assignee: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
     pub due: Option<Option<String>>,
     #[serde(default, deserialize_with = "nullable")]
@@ -117,6 +120,15 @@ fn check_status(store: &Store, status: &str) -> Result<(), OpError> {
         ));
     }
     Ok(())
+}
+
+/// Trims an assignee and rejects empty names; clearing is done with `null`.
+fn clean_assignee(assignee: &str) -> Result<&str, OpError> {
+    let name = assignee.trim();
+    if name.is_empty() {
+        return invalid("`assignee` must not be empty; use null to clear it");
+    }
+    Ok(name)
 }
 
 fn check_due(due: &str) -> Result<(), OpError> {
@@ -286,6 +298,12 @@ pub fn create(store: &Store, dir: &Path, new: NewTicket) -> Result<Created, OpEr
     if let Some(due) = &new.due {
         check_due(due)?;
     }
+    let assignee = new
+        .assignee
+        .as_deref()
+        .map(clean_assignee)
+        .transpose()?
+        .map(str::to_string);
     let folder = target_folder(store, &new)?;
 
     let mut taken: HashSet<String> = store.ids().into_iter().collect();
@@ -309,6 +327,7 @@ pub fn create(store: &Store, dir: &Path, new: NewTicket) -> Result<Created, OpEr
             title: title.to_string(),
             status: status.clone(),
             priority: new.priority.clone(),
+            assignee: assignee.clone(),
             due: new.due.clone(),
             tags: new.tags.clone(),
             parent: new.parent.clone(),
@@ -473,6 +492,10 @@ pub fn update(
     if let Some(priority) = &update.priority {
         patch = patch.priority(priority.as_deref());
     }
+    if let Some(assignee) = &update.assignee {
+        let name = assignee.as_deref().map(clean_assignee).transpose()?;
+        patch = patch.assignee(name);
+    }
     if let Some(due) = &update.due {
         if let Some(d) = due {
             check_due(d)?;
@@ -622,6 +645,66 @@ mod tests {
         assert_eq!((t.priority.clone(), t.due.clone()), (None, None));
         assert_eq!(t.status, "done");
         let _ = dir;
+    }
+
+    #[test]
+    fn assignee_is_set_on_create_changed_and_cleared() {
+        let (dir, store) = setup();
+        let mut n = new("Owned");
+        n.assignee = Some("  Ann ".into());
+        let created = create(&store, dir.path(), n).unwrap();
+        let store = Store::scan(store.config());
+        assert_eq!(
+            store.get(&created.id).unwrap().ticket.assignee.as_deref(),
+            Some("Ann")
+        );
+        let set: Update = serde_json::from_str(r#"{"assignee":"Bob"}"#).unwrap();
+        update(&store, &created.id, &set, NOW).unwrap();
+        let store = Store::scan(store.config());
+        assert_eq!(
+            store.get(&created.id).unwrap().ticket.assignee.as_deref(),
+            Some("Bob")
+        );
+        let clear: Update = serde_json::from_str(r#"{"assignee":null}"#).unwrap();
+        update(&store, &created.id, &clear, NOW).unwrap();
+        let store = Store::scan(store.config());
+        assert_eq!(store.get(&created.id).unwrap().ticket.assignee, None);
+        let text = fs::read_to_string(&store.get(&created.id).unwrap().path).unwrap();
+        assert!(!text.contains("assignee"));
+    }
+
+    #[test]
+    fn assignee_rejects_blank_and_multiline_values() {
+        let (dir, store) = setup();
+        let mut n = new("t");
+        n.assignee = Some("  ".into());
+        assert!(msg(create(&store, dir.path(), n)).contains("assignee"));
+        let blank: Update = serde_json::from_str(r#"{"assignee":" "}"#).unwrap();
+        assert!(msg(update(&store, "ST-1", &blank, NOW)).contains("assignee"));
+        let multi: Update = serde_json::from_str(r#"{"assignee":"a\nb"}"#).unwrap();
+        assert!(matches!(
+            update(&store, "ST-1", &multi, NOW),
+            Err(OpError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn existing_free_form_assignee_is_adopted_and_kept_on_other_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.md",
+            &ticket("ST-1", "todo", "# note\nassignee: Ann\nteam: core\n"),
+        );
+        let store = Store::scan(&Config::default_for(dir.path()));
+        assert_eq!(
+            store.get("ST-1").unwrap().ticket.assignee.as_deref(),
+            Some("Ann")
+        );
+        let up: Update = serde_json::from_str(r#"{"status":"done"}"#).unwrap();
+        update(&store, "ST-1", &up, NOW).unwrap();
+        let text = fs::read_to_string(dir.path().join("a.md")).unwrap();
+        assert!(text.contains("# note\nassignee: Ann\nteam: core\n"));
     }
 
     #[test]

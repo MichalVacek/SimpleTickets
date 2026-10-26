@@ -4,8 +4,8 @@ use crate::client::{encode, Backend};
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering;
 
-const FILTER_KEYS: [&str; 7] = [
-    "status", "category", "priority", "tag", "parent", "title", "due_by",
+const FILTER_KEYS: [&str; 8] = [
+    "status", "category", "priority", "assignee", "tag", "parent", "title", "due_by",
 ];
 const DEFAULT_ORDER: [&str; 2] = ["due", "priority"];
 
@@ -15,6 +15,7 @@ pub fn definitions() -> Value {
         "status": {"type": "string", "description": "Status name, for example todo"},
         "category": {"type": "string", "enum": ["todo", "in-progress", "done", "cancelled"]},
         "priority": {"type": "string"},
+        "assignee": {"type": "string", "description": "Case-insensitive assignee name"},
         "tag": {"type": "string"},
         "parent": {"type": "string", "description": "ID of the parent ticket"},
         "title": {"type": "string", "description": "Case-insensitive substring of the title"},
@@ -45,6 +46,7 @@ pub fn definitions() -> Value {
         "title": {"type": "string"},
         "status": {"type": "string"},
         "priority": {"type": ["string", "null"]},
+        "assignee": {"type": ["string", "null"], "description": "Who owns the ticket; null clears it on update"},
         "due": {"type": ["string", "null"], "description": "YYYY-MM-DD"},
         "tags": {"type": "array", "items": {"type": "string"}},
         "parent": {"type": ["string", "null"]},
@@ -81,7 +83,7 @@ pub fn definitions() -> Value {
         },
         {
             "name": "update_ticket",
-            "description": "Change fields of a ticket. Only the given fields change; null clears priority, due and parent.",
+            "description": "Change fields of a ticket. Only the given fields change; null clears priority, assignee, due and parent.",
             "inputSchema": {"type": "object", "properties": update_props, "required": ["id"]}
         },
         {
@@ -353,12 +355,13 @@ mod tests {
         call(
             &fake,
             "list_tickets",
-            &json!({"title": "a b", "blocked": false, "limit": 5, "fields": {"team": "core"}}),
+            &json!({"title": "a b", "assignee": "Ann Lee", "blocked": false, "limit": 5, "fields": {"team": "core"}}),
         )
         .unwrap();
         let path = fake.seen.borrow()[0].1.clone();
         assert!(path.starts_with("/v1/tickets?"));
         assert!(path.contains("title=a%20b"));
+        assert!(path.contains("assignee=Ann%20Lee"));
         assert!(path.contains("blocked=false"));
         assert!(path.contains("limit=5"));
         assert!(path.contains("field.team=core"));

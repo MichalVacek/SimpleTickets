@@ -18,6 +18,7 @@ pub fn ticket_json(store: &Store, entry: &IndexedTicket, detail: bool) -> Value 
         "category": category(store.own_category(&t.id)),
         "effective_category": category(store.effective_category(&t.id)),
         "priority": t.priority,
+        "assignee": t.assignee,
         "due": t.due,
         "tags": t.tags,
         "parent": t.parent,

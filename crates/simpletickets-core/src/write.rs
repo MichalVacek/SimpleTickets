@@ -96,6 +96,10 @@ impl Patch {
         self.scalar("priority", priority)
     }
 
+    pub fn assignee(self, assignee: Option<&str>) -> Self {
+        self.scalar("assignee", assignee)
+    }
+
     pub fn due(self, due: Option<&str>) -> Self {
         self.scalar("due", due)
     }

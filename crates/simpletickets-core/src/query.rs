@@ -14,6 +14,8 @@ pub struct Filter {
     /// Category of the ticket's own status.
     pub category: Option<Category>,
     pub priority: Option<String>,
+    /// Assignee, case-insensitive.
+    pub assignee: Option<String>,
     pub tag: Option<String>,
     pub parent: Option<String>,
     /// Case-insensitive substring of the title.
@@ -28,7 +30,7 @@ pub struct Filter {
 impl Filter {
     /// Builds a filter from `key=value` pairs, as given by the CLI and the API.
     ///
-    /// Keys: `status`, `category`, `priority`, `tag`, `parent`, `title`,
+    /// Keys: `status`, `category`, `priority`, `assignee`, `tag`, `parent`, `title`,
     /// `blocked`, `due_by` (a date or `today`) and `field.<key>`.
     pub fn from_pairs(pairs: &[(String, String)]) -> Result<Filter, String> {
         let mut f = Filter::default();
@@ -43,6 +45,7 @@ impl Filter {
                     )
                 }
                 "priority" => f.priority = Some(v),
+                "assignee" => f.assignee = Some(v),
                 "tag" => f.tag = Some(v),
                 "parent" => f.parent = Some(v),
                 "title" => f.title = Some(v),
@@ -88,6 +91,11 @@ impl Filter {
                 return false;
             }
         }
+        if let Some(a) = &self.assignee {
+            if t.assignee.as_deref().map(str::to_lowercase) != Some(a.to_lowercase()) {
+                return false;
+            }
+        }
         if let Some(tag) = &self.tag {
             if !t.tags.iter().any(|x| x.eq_ignore_ascii_case(tag)) {
                 return false;
@@ -117,6 +125,7 @@ impl Filter {
         self.fields
             .iter()
             .all(|(key, want)| match t.extra.get(key.as_str()) {
+                None if key == "assignee" => t.assignee.as_deref() == Some(want.as_str()),
                 Some(Yaml::String(s)) => s == want,
                 Some(Yaml::Number(n)) => n.to_string() == *want,
                 Some(Yaml::Bool(b)) => b.to_string() == *want,
@@ -170,7 +179,7 @@ mod tests {
             &ticket(
                 "ST-10",
                 "todo",
-                "priority: high\ndue: 2020-01-01\ntags: [Work]\nteam: core\n",
+                "priority: high\nassignee: Ann\ndue: 2020-01-01\ntags: [Work]\nteam: core\n",
             ),
         );
         write(r, "b.md", &ticket("ST-2", "done", "priority: low\n"));
@@ -203,6 +212,8 @@ mod tests {
         assert_eq!(q(&[("status", "TODO")]), ["ST-3", "ST-10"]);
         assert_eq!(q(&[("category", "done")]), ["ST-2"]);
         assert_eq!(q(&[("priority", "High")]), ["ST-10"]);
+        assert_eq!(q(&[("assignee", "ANN")]), ["ST-10"]);
+        assert_eq!(q(&[("assignee", "bob")]), Vec::<String>::new());
         assert_eq!(q(&[("tag", "work")]), ["ST-10"]);
         assert_eq!(q(&[("parent", "ST-2")]), ["ST-3"]);
         assert_eq!(q(&[("title", "ticket st-1")]), ["ST-10"]);
@@ -211,6 +222,7 @@ mod tests {
         assert_eq!(q(&[("due_by", "today")]), ["ST-10"]);
         assert_eq!(q(&[("due_by", "2019-12-31")]), Vec::<String>::new());
         assert_eq!(q(&[("field.team", "core")]), ["ST-10"]);
+        assert_eq!(q(&[("field.assignee", "Ann")]), ["ST-10"]);
         assert_eq!(q(&[("status", "todo"), ("tag", "work")]), ["ST-10"]);
     }
 

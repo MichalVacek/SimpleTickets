@@ -64,6 +64,26 @@ fn create_list_show_set_status() {
 }
 
 #[test]
+fn assignee_create_filter_assign_and_unassign() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let a = create_id(d, &["Owned", "--assignee", "Ann"]);
+    let b = create_id(d, &["Free"]);
+    assert!(ok(d, &["list", "--assignee", "ann"]).contains("Owned"));
+    assert!(!ok(d, &["list", "--assignee", "ann"]).contains("Free"));
+    assert!(ok(d, &["list"]).contains("@Ann"));
+    assert!(ok(d, &["show", &a]).contains("assignee:  Ann"));
+
+    ok(d, &["assign", &b, "Bob Stone"]);
+    let json: serde_json::Value = serde_json::from_str(&ok(d, &["show", &b, "--json"])).unwrap();
+    assert_eq!(json["assignee"], "Bob Stone");
+    assert!(ok(d, &["assign", &b, "Bob Stone"]).contains("already"));
+    ok(d, &["unassign", &a]);
+    assert!(ok(d, &["show", &a]).contains("assignee:  -"));
+    assert!(!st(d, &["assign", &b, " "]).status.success());
+}
+
+#[test]
 fn rules_run_after_set_status_and_are_audited() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();

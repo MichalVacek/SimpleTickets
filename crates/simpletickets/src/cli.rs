@@ -46,6 +46,10 @@ pub enum Command {
     },
     /// Change the status of a ticket
     SetStatus { id: String, status: String },
+    /// Assign a ticket to someone
+    Assign { id: String, assignee: String },
+    /// Remove the assignee of a ticket
+    Unassign { id: String },
     /// Report inconsistencies in the ticket files
     Doctor {
         #[arg(long)]
@@ -144,6 +148,8 @@ pub struct CreateArgs {
     pub status: Option<String>,
     #[arg(long)]
     pub priority: Option<String>,
+    #[arg(long)]
+    pub assignee: Option<String>,
     /// Due date, YYYY-MM-DD
     #[arg(long)]
     pub due: Option<String>,
@@ -177,6 +183,8 @@ pub struct ListArgs {
     #[arg(long)]
     pub priority: Option<String>,
     #[arg(long)]
+    pub assignee: Option<String>,
+    #[arg(long)]
     pub tag: Option<String>,
     #[arg(long)]
     pub parent: Option<String>,
@@ -203,6 +211,7 @@ impl ListArgs {
             ("status", &self.status),
             ("category", &self.category),
             ("priority", &self.priority),
+            ("assignee", &self.assignee),
             ("tag", &self.tag),
             ("parent", &self.parent),
             ("title", &self.title),
@@ -322,6 +331,8 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             ctx.reconcile(ctx.scan());
             Ok(ExitCode::SUCCESS)
         }
+        Command::Assign { id, assignee } => assign(&ctx, &id, Some(assignee)),
+        Command::Unassign { id } => assign(&ctx, &id, None),
         Command::ReassignId { id, path } => {
             let store = ctx.scan();
             let done = ops::reassign_id(&store, &id, path.as_deref(), explicit().write)
@@ -406,12 +417,29 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
     }
 }
 
+fn assign(ctx: &Context, id: &str, assignee: Option<String>) -> Result<ExitCode, String> {
+    let store = ctx.scan();
+    let up = Update {
+        assignee: Some(assignee.clone()),
+        ..Update::default()
+    };
+    let outcome = ops::update(&store, id, &up, explicit().write).map_err(|e| e.to_string())?;
+    let who = assignee.as_deref().map_or("nobody", str::trim);
+    if outcome.changed {
+        println!("{id} -> {who}");
+    } else {
+        println!("{id} is already assigned to {who}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn create(ctx: &Context, args: CreateArgs) -> Result<ExitCode, String> {
     let store = ctx.scan();
     let new = NewTicket {
         title: args.title,
         status: args.status,
         priority: args.priority,
+        assignee: args.assignee,
         due: args.due,
         tags: args.tags,
         parent: args.parent,
@@ -467,6 +495,9 @@ fn list(ctx: &Context, args: &ListArgs) -> Result<ExitCode, String> {
         if let Some(due) = &t.due {
             flags.push_str(&format!(" (due {due})"));
         }
+        if let Some(who) = &t.assignee {
+            flags.push_str(&format!(" @{who}"));
+        }
         println!(
             "{:width$}  {:status_width$}  {:6}  {}{flags}",
             t.id,
@@ -504,6 +535,7 @@ fn show(ctx: &Context, id: &str, json: bool) -> Result<ExitCode, String> {
         println!("derived:   {}", text("effective_category"));
     }
     println!("priority:  {}", text("priority"));
+    println!("assignee:  {}", text("assignee"));
     println!("due:       {}", text("due"));
     println!("tags:      {}", list("tags"));
     println!("parent:    {}", text("parent"));

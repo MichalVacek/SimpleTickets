@@ -5,11 +5,12 @@ use serde_yaml_ng::{Mapping, Value as Yaml};
 use std::fmt;
 
 /// Frontmatter keys owned by the core; every other key is preserved untouched.
-pub const OWNED_KEYS: [&str; 9] = [
+pub const OWNED_KEYS: [&str; 10] = [
     "id",
     "title",
     "status",
     "priority",
+    "assignee",
     "due",
     "tags",
     "parent",
@@ -23,6 +24,9 @@ pub struct Ticket {
     pub title: String,
     pub status: String,
     pub priority: Option<String>,
+    /// Who owns the ticket. A top-level `assignee` text or number value is read
+    /// into this field; any other shape stays in `extra`.
+    pub assignee: Option<String>,
     pub due: Option<String>,
     pub tags: Vec<String>,
     pub parent: Option<String>,
@@ -93,6 +97,12 @@ impl Ticket {
         let title = fields.required_scalar(&mut map, "title")?;
         let status = fields.required_scalar(&mut map, "status")?;
         let priority = fields.optional_scalar(&mut map, "priority")?;
+        let assignee = match map.get("assignee") {
+            Some(Yaml::String(_) | Yaml::Number(_) | Yaml::Null) => fields
+                .optional_scalar(&mut map, "assignee")?
+                .filter(|a| !a.trim().is_empty()),
+            _ => None,
+        };
         let due = fields.optional_scalar(&mut map, "due")?;
         let tags = fields.list(&mut map, "tags")?;
         let parent = fields.optional_scalar(&mut map, "parent")?;
@@ -104,6 +114,7 @@ impl Ticket {
             title,
             status,
             priority,
+            assignee,
             due,
             tags,
             parent,
@@ -139,6 +150,7 @@ impl Ticket {
             ("title", scalar(&self.title)),
             ("status", scalar(&self.status)),
             ("priority", opt(&self.priority)),
+            ("assignee", opt(&self.assignee)),
             ("due", opt(&self.due)),
             ("tags", list(&self.tags)),
             ("parent", opt(&self.parent)),
@@ -265,6 +277,34 @@ custom: {a: 1}\n\
         assert_eq!(t.related, ["ST-3"]);
         assert_eq!(t.extra.len(), 1);
         assert!(t.extra.contains_key("custom"));
+    }
+
+    #[test]
+    fn assignee_is_a_core_field() {
+        let t = Ticket::parse("---\nid: A\ntitle: T\nstatus: todo\nassignee: Ann\n---\n").unwrap();
+        assert_eq!(t.assignee.as_deref(), Some("Ann"));
+        assert!(!t.extra.contains_key("assignee"));
+        let text = t.render_new("").unwrap();
+        assert!(text.contains("assignee: Ann\n"));
+        assert_eq!(Ticket::parse(&text).unwrap(), t);
+    }
+
+    #[test]
+    fn assignee_accepts_numbers_and_ignores_empty_values() {
+        let n = Ticket::parse("---\nid: A\ntitle: T\nstatus: todo\nassignee: 42\n---\n").unwrap();
+        assert_eq!(n.assignee.as_deref(), Some("42"));
+        for empty in ["assignee:", "assignee: \"\"", "assignee: \"  \""] {
+            let text = format!("---\nid: A\ntitle: T\nstatus: todo\n{empty}\n---\n");
+            assert_eq!(Ticket::parse(&text).unwrap().assignee, None, "{empty}");
+        }
+    }
+
+    #[test]
+    fn non_text_assignee_stays_an_extra_key() {
+        let t = Ticket::parse("---\nid: A\ntitle: T\nstatus: todo\nassignee: [Ann, Bob]\n---\n")
+            .unwrap();
+        assert_eq!(t.assignee, None);
+        assert!(t.extra.contains_key("assignee"));
     }
 
     #[test]

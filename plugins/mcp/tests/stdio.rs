@@ -182,6 +182,20 @@ fn drives_the_daemon_end_to_end_over_stdio() {
         let (_, next) = plugin.tool("next_ticket", json!({}));
         assert_eq!(next["id"], "ST-3");
 
+        let (err, owned) = plugin.tool(
+            "create_ticket",
+            json!({"title": "Owned work", "assignee": "Ann"}),
+        );
+        assert!(!err);
+        assert_eq!(owned["assignee"], "Ann");
+        let owned_id = owned["id"].as_str().unwrap().to_string();
+        let (_, mine) = plugin.tool("list_tickets", json!({"assignee": "ann"}));
+        assert_eq!(mine.as_array().unwrap().len(), 1);
+        let (_, next) = plugin.tool("next_ticket", json!({"assignee": "Ann"}));
+        assert_eq!(next["id"], owned_id.as_str());
+        let (_, cleared) = plugin.tool("update_ticket", json!({"id": owned_id, "assignee": null}));
+        assert!(cleared["assignee"].is_null());
+
         let (err, bad) = plugin.tool("update_ticket", json!({"id": "ST-2", "status": "nonsense"}));
         assert!(err);
         assert!(bad.as_str().unwrap().contains("400"));
