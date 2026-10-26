@@ -2,6 +2,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod diff;
 pub mod doctor;
 pub mod frontmatter;
 pub mod hash;

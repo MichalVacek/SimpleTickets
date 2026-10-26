@@ -8,6 +8,7 @@ use notify::{PollWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
 use simpletickets_core::config::{Config, CONFIG_FILE};
+use simpletickets_core::diff;
 use simpletickets_core::lease::{self, Lease};
 use simpletickets_core::migration::{self, Journal, MigrationError};
 use simpletickets_core::rules::{self, RunOptions};
@@ -96,7 +97,11 @@ fn log_entry(kind: &str, data: &Value) -> (Level, String) {
         "migration.finished" => &["state", "steps", "conflicts"],
         "update.available" => &["current", "latest", "url"],
         "warning.raised" => &["id", "rule", "message"],
-        "ticket.created" | "ticket.updated" | "tombstone.forgotten" => &["id"],
+        "ticket.created" | "ticket.deleted" | "ticket.moved" | "ticket.updated" => {
+            &["id", "title", "source"]
+        }
+        "ticket.status_changed" => &["id", "from", "to", "source"],
+        "tombstone.forgotten" => &["id"],
         _ => &[],
     };
     let pairs: Vec<(&str, String)> = keys
@@ -111,7 +116,9 @@ fn log_entry(kind: &str, data: &Value) -> (Level, String) {
             _ => Level::Info,
         },
         "scan" if data.get("reason").and_then(Value::as_str) == Some("startup") => Level::Info,
-        "scan" | "ticket.created" | "ticket.updated" => Level::Debug,
+        "scan" | "ticket.created" | "ticket.updated" | "ticket.status_changed" | "ticket.moved" => {
+            Level::Debug
+        }
         _ => Level::Info,
     };
     let fields = logger::fields(&pairs);
@@ -121,6 +128,31 @@ fn log_entry(kind: &str, data: &Value) -> (Level, String) {
         format!("{kind} {fields}")
     };
     (level, line)
+}
+
+/// Reasons for a rescan that follow a write made through the API; any other
+/// rescan finds changes made outside the daemon.
+const API_REASONS: [&str; 6] = [
+    "create",
+    "update",
+    "reassign-id",
+    "forget",
+    "config",
+    "migration",
+];
+
+/// Per ticket, the status before the first and after the last rule change of a run,
+/// in order of first change; tickets that ended where they began are left out.
+fn net_status_rewrites(changes: &[rules::Change]) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for c in changes {
+        match out.iter_mut().find(|(id, _, _)| *id == c.id) {
+            Some(entry) => entry.2 = c.to.clone(),
+            None => out.push((c.id.clone(), c.from.clone(), c.to.clone())),
+        }
+    }
+    out.retain(|(_, from, to)| from != to);
+    out
 }
 
 impl Events {
@@ -267,6 +299,14 @@ impl Shared {
         }
         let store = Store::scan_after(&inner.config, Some(&inner.store));
         self.announce_roots(inner, &store, &mut outcome);
+        let source = if API_REASONS.contains(&reason) {
+            "api"
+        } else {
+            "scan"
+        };
+        for change in diff::diff(&inner.store, &store) {
+            self.events.publish(change.kind(), change.data(source));
+        }
         let (store, report) = if self.rules_enabled() {
             rules::reconcile(store, Some(&self.audit), RunOptions::default())
         } else {
@@ -285,6 +325,13 @@ impl Shared {
         }
         for change in &report.changes {
             self.events.publish("rule.applied", json!(change));
+        }
+        for (id, from, to) in net_status_rewrites(&report.changes) {
+            if let Some(entry) = store.get(&id) {
+                for change in diff::status_rewrite(store.config(), entry, &from, &to) {
+                    self.events.publish(change.kind(), change.data("rule"));
+                }
+            }
         }
         for warning in &report.raised {
             self.events.publish("warning.raised", json!(warning));

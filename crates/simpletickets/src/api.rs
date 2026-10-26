@@ -343,9 +343,6 @@ fn create_ticket(shared: &Shared, req: &Request) -> Reply {
         Ok(c) => c,
         Err(e) => return e.into(),
     };
-    shared
-        .events
-        .publish("ticket.created", json!({"id": created.id}));
     after_write(shared, &mut inner, "create", &created.id, 201)
 }
 
@@ -356,12 +353,7 @@ fn update_ticket(shared: &Shared, req: &Request, id: &str) -> Reply {
     };
     let mut inner = shared.lock();
     match ops::update(&inner.store, id, &update, explicit_write()) {
-        Ok(outcome) => {
-            if outcome.changed {
-                shared.events.publish("ticket.updated", json!({"id": id}));
-            }
-            after_write(shared, &mut inner, "update", id, 200)
-        }
+        Ok(_) => after_write(shared, &mut inner, "update", id, 200),
         Err(e) => e.into(),
     }
 }
