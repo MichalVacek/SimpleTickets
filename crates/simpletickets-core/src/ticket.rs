@@ -75,7 +75,7 @@ impl Ticket {
         let offset = doc.first_frontmatter_line() - 1;
         let yaml: Yaml = serde_yaml_ng::from_str(fm).map_err(|e| ParseError {
             line: e.location().map(|l| l.line() + offset),
-            message: e.to_string(),
+            message: shift_line_numbers(&e.to_string(), offset),
         })?;
         let mut map = match yaml {
             Yaml::Null => Mapping::new(),
@@ -159,6 +159,24 @@ pub fn has_ticket_marker(text: &str) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Rewrites `line N` mentions in a YAML error so they refer to file lines.
+fn shift_line_numbers(message: &str, offset: usize) -> String {
+    let mut out = String::new();
+    let mut rest = message;
+    while let Some(i) = rest.find("line ") {
+        let (head, tail) = rest.split_at(i + 5);
+        out.push_str(head);
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        match tail[..digits].parse::<usize>() {
+            Ok(n) => out.push_str(&(n + offset).to_string()),
+            Err(_) => out.push_str(&tail[..digits]),
+        }
+        rest = &tail[digits..];
+    }
+    out.push_str(rest);
+    out
 }
 
 struct Fields<'a> {
@@ -268,6 +286,12 @@ custom: {a: 1}\n\
         let e = Ticket::parse("---\nid: A\ntitle: [oops\nstatus: todo\n---\n").unwrap_err();
         assert!(e.line.is_some());
         assert!(e.line.unwrap() >= 3, "{e}");
+    }
+
+    #[test]
+    fn yaml_error_message_uses_file_lines() {
+        let e = Ticket::parse("---\nid: A\ntitle: [oops\nstatus: todo\n---\n").unwrap_err();
+        assert!(e.message.contains("line 4"), "{e}");
     }
 
     #[test]

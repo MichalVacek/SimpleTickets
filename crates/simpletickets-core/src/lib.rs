@@ -1,8 +1,11 @@
 //! Core library for SimpleTickets: ticket model, configuration and store.
 
 pub mod config;
+pub mod doctor;
 pub mod frontmatter;
+pub mod hash;
 pub mod id;
+pub mod store;
 pub mod ticket;
 
 /// Crate version, as declared in the manifest.
