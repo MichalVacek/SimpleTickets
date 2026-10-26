@@ -2,6 +2,7 @@
 
 use crate::config::Category;
 use crate::id::sequence_number;
+use crate::search::{Hit, Query};
 use crate::store::{IndexedTicket, Store};
 use crate::time::{is_date, today};
 use serde_yaml_ng::Value as Yaml;
@@ -150,6 +151,37 @@ pub fn list<'a>(store: &'a Store, filter: &Filter) -> Vec<&'a IndexedTicket> {
     out
 }
 
+fn natural_key(prefix: &str, id: &str) -> (u64, String) {
+    (
+        sequence_number(prefix, id).unwrap_or(u64::MAX),
+        id.to_string(),
+    )
+}
+
+/// Tickets matching the text `query` and `filter`, best match first; equal
+/// scores come in natural ID order.
+pub fn search<'a>(
+    store: &'a Store,
+    query: &Query,
+    filter: &Filter,
+) -> Vec<(&'a IndexedTicket, Hit)> {
+    let prefix = store.config().id_prefix.as_str();
+    let mut out: Vec<(&IndexedTicket, Hit)> = store
+        .search(query)
+        .into_iter()
+        .filter_map(|hit| {
+            let entry = store.get(&hit.id)?;
+            filter.matches(store, entry).then_some((entry, hit))
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.1.score
+            .cmp(&a.1.score)
+            .then_with(|| natural_key(prefix, &a.1.id).cmp(&natural_key(prefix, &b.1.id)))
+    });
+    out
+}
+
 /// Tickets that act as parents: they have sub-tickets or sit in the parent folder.
 pub fn parents(store: &Store) -> Vec<&IndexedTicket> {
     let folder = store.config().parent_folder.clone();
@@ -224,6 +256,39 @@ mod tests {
         assert_eq!(q(&[("field.team", "core")]), ["ST-10"]);
         assert_eq!(q(&[("field.assignee", "Ann")]), ["ST-10"]);
         assert_eq!(q(&[("status", "todo"), ("tag", "work")]), ["ST-10"]);
+    }
+
+    #[test]
+    fn search_ranks_filters_and_orders_ties_naturally() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        write(r, "a.md", &ticket("ST-10", "todo", ""));
+        write(r, "b.md", &ticket("ST-2", "todo", ""));
+        write(r, "c.md", &ticket("ST-3", "done", ""));
+        write(
+            r,
+            "d.md",
+            "---\nid: ST-4\ntitle: Body\nstatus: todo\n---\nTicket ticket\n",
+        );
+        let s = Store::scan(&Config::default_for(r));
+        let ids = |q: &str, pairs: &[(&str, &str)]| -> Vec<String> {
+            let pairs: Vec<_> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let f = Filter::from_pairs(&pairs).unwrap();
+            search(&s, &Query::parse(q).unwrap(), &f)
+                .iter()
+                .map(|(e, _)| e.ticket.id.clone())
+                .collect()
+        };
+        // Titles read `Ticket ST-n`: one title hit each; ST-4 has two body hits.
+        assert_eq!(ids("ticket", &[]), ["ST-2", "ST-3", "ST-10", "ST-4"]);
+        assert_eq!(
+            ids("ticket", &[("status", "todo")]),
+            ["ST-2", "ST-10", "ST-4"]
+        );
+        assert_eq!(ids("\"ticket st-3\"", &[]), ["ST-3"]);
     }
 
     #[test]

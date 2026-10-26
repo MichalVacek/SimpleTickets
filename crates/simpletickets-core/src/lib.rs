@@ -12,6 +12,7 @@ pub mod migration;
 pub mod ops;
 pub mod query;
 pub mod rules;
+pub mod search;
 pub mod state;
 pub mod store;
 pub mod templates;

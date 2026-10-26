@@ -40,6 +40,8 @@ simpletickets list --assignee ann
 simpletickets list --field team=core --json
 simpletickets show ST-1
 simpletickets set-status ST-1 done
+simpletickets search "quarterly report" --status todo
+simpletickets search quarterly --json
 simpletickets doctor
 simpletickets forget ST-2
 simpletickets reassign-id ST-4 --path ~/tickets/copy-of-st-4.md
@@ -50,6 +52,7 @@ simpletickets templates
 - `create` picks the next ID (`ST-1`, `ST-2`, ...), renders the body from a template (`--template`, default `default`) and writes `ID-title.md`. With `parent_folder` and `subticket_folder` configured, `--role parent` and `--parent` choose the folder.
 - `list` filters: `--status`, `--category`, `--priority`, `--assignee`, `--tag`, `--parent`, `--title`, `--blocked`, `--due-by`, `--field key=value`. Add `--json` for machine-readable output.
 - The assignee is a core frontmatter key (`assignee: Ann`), a single line of text. `create --assignee`, `assign ID NAME` and `unassign ID` set and clear it; `list --assignee` matches case-insensitively and `list` shows it as `@name`. A top-level `assignee` text or number that already exists in a file is read as the core field, so `--field assignee=Ann` and files written before it became a core key keep working; an `assignee` of any other shape (a list, say) stays a free-form key.
+- `search QUERY` finds tickets by title and body text, best match first, with a snippet of the first body match (`--json` adds `score`, `match_field` and `snippet`; `--limit`, `--status`, `--category`, `--assignee`, `--tag` narrow it). See Search below.
 - `set-status`, `create` and `rescan` run the rules afterwards. A sub-ticket in progress sets its parent to in progress; a done (or, by default, cancelled) blocker stops blocking. Parents inside `parent_folder` are specification files: their state is derived and never written. Automatic changes are appended to `.simpletickets/audit.jsonl`; `rescan --dry-run` shows them without writing.
 - Custom templates are Markdown files in `.simpletickets/templates/NAME.md` using `{{title}}`, `{{id}}` and `{{date}}`.
 - `doctor` exits non-zero when it finds duplicate IDs, malformed frontmatter, missing link targets, cycles, orphans or an offline root. It also lists the rule warnings recorded by the last rule run (see below); warnings never change the exit code.
@@ -130,6 +133,7 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 | `GET /v1/health` | version, `status` (`ok` or `degraded` while a root is offline), ticket and frozen counts, `offline_roots`, `rules_enabled` and `update` (`null`, or the newer release found by the update check) |
 | `GET /v1/parents` | parent tickets |
 | `GET /v1/tickets?status=&category=&priority=&assignee=&tag=&parent=&title=&blocked=&due_by=&field.<key>=&limit=` | list and filter |
+| `GET /v1/search?q=&limit=&<filters>` | full-text search; the same filters as the list, results carry `score`, `match_field` and `snippet`; `q` on `GET /v1/tickets` does the same |
 | `GET /v1/tickets/{id}` | one ticket with body and derived data |
 | `POST /v1/tickets` | create (`title`, `status`, `priority`, `assignee`, `due`, `tags`, `parent`, `blocked_by`, `related`, `template`, `body`, `role`) |
 | `PATCH /v1/tickets/{id}` | update; `null` clears `priority`, `assignee`, `due`, `parent` |
@@ -143,6 +147,17 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 | `GET /v1/events?since=N&wait=S` | event stream by long polling: events after sequence `N`, waiting up to `S` seconds |
 | `GET /v1/audit?limit=N` | automatic changes |
 | `GET /v1/templates` | template names |
+
+## Search
+
+Search covers ticket titles and Markdown bodies (other frontmatter keys are not searched; use the list filters for those). The files stay the source of truth: the daemon and the CLI build an in-memory inverted index on every scan and discard it with the scan, so results are as fresh as the last scan and nothing extra is stored on disk.
+
+- Case-insensitive and token-based: a token is a run of letters and digits, so `ST-12` is the tokens `st` and `12`. A word with punctuation matches only when its tokens sit next to each other.
+- Every word and every `"quoted phrase"` must match (AND). A phrase matches its tokens in order, next to each other. An unterminated quote runs to the end of the query.
+- Words match whole tokens: no stemming, prefixes, fuzziness, accent folding, OR or NOT. `report` does not find `reports`.
+- Ranking: each title occurrence scores 5, each body occurrence 1; equal scores come in ID order, so the order is deterministic.
+- Bodies are held in memory for snippets and matching, so memory grows with the total size of the ticket files. The index is rebuilt in full on each scan, which is fine for thousands of tickets but is not designed for very large folders.
+- A query with no letters or digits is refused (`400` over the API).
 
 ## MCP plugin
 
@@ -159,6 +174,7 @@ Settings come from flags or `SIMPLETICKETS_URL`, `SIMPLETICKETS_TOKEN`, `SIMPLET
 | Tool | Purpose |
 |---|---|
 | `list_tickets` | filters: `status`, `category`, `priority`, `assignee`, `tag`, `parent`, `title`, `blocked`, `due_by`, `fields`, `limit` |
+| `search_tickets` | `query` (words and `"quoted phrases"`), optional `status`, `category`, `priority`, `assignee`, `tag`, `parent`, `limit`; best matches first with `score` and `snippet` |
 | `show_ticket` | one ticket with body and derived data |
 | `create_ticket` | `title` plus any of the other ticket fields, `body`, `template`, `role` (`parent` or `sub`) |
 | `update_ticket` | `id` plus the fields to change; `null` clears `priority`, `assignee`, `due`, `parent` |

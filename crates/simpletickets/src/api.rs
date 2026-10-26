@@ -6,8 +6,9 @@ use simpletickets_core::config::{self, Config};
 use simpletickets_core::migration::{self, MigrationError};
 use simpletickets_core::ops::{self, NewTicket, OpError, Update};
 use simpletickets_core::query::{self, Filter};
+use simpletickets_core::search::Query;
 use simpletickets_core::templates;
-use simpletickets_core::view::{doctor_json, ticket_json, tombstones_json};
+use simpletickets_core::view::{doctor_json, hit_json, ticket_json, tombstones_json};
 use simpletickets_core::write::WriteOptions;
 use std::io::Read;
 use std::sync::atomic::Ordering;
@@ -202,6 +203,7 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
             reply(200, Value::Array(items))
         }
         (["v1", "tickets"], "GET") => list_tickets(shared, req),
+        (["v1", "search"], "GET") => search_tickets(shared, req),
         (["v1", "tickets"], "POST") => create_ticket(shared, req),
         (["v1", "tickets", id], "GET") => {
             let inner = shared.lock();
@@ -244,8 +246,8 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
         }
         (["v1", "templates"], "GET") => reply(200, json!(templates::list(&shared.dir))),
         (
-            ["v1", "health" | "parents" | "tickets" | "rescan" | "doctor" | "config" | "migration"
-            | "events" | "audit" | "templates" | "tombstones"]
+            ["v1", "health" | "parents" | "tickets" | "search" | "rescan" | "doctor" | "config"
+            | "migration" | "events" | "audit" | "templates" | "tombstones"]
             | ["v1", "migration", "resume"]
             | ["v1", "tickets" | "tombstones", _]
             | ["v1", "tickets", _, "reassign-id"],
@@ -266,7 +268,12 @@ fn parse_body<T: serde::de::DeserializeOwned>(req: &Request) -> Result<T, Reply>
     serde_json::from_slice(&req.body).map_err(|e| error(400, format!("invalid JSON body: {e}")))
 }
 
+/// Lists tickets; with `q` the list is the text matches, best first, each with
+/// its score and snippet.
 fn list_tickets(shared: &Shared, req: &Request) -> Reply {
+    if req.query.iter().any(|(k, _)| k == "q") {
+        return search_tickets(shared, req);
+    }
     let limit = num_param(req, "limit");
     let pairs: Vec<(String, String)> = req
         .query
@@ -283,6 +290,39 @@ fn list_tickets(shared: &Shared, req: &Request) -> Reply {
         .into_iter()
         .take(limit.map_or(usize::MAX, |l| l as usize))
         .map(|e| ticket_json(&inner.store, e, false))
+        .collect();
+    reply(200, Value::Array(items))
+}
+
+/// Full-text search over titles and bodies; the other query parameters are the
+/// list filters.
+fn search_tickets(shared: &Shared, req: &Request) -> Reply {
+    let limit = num_param(req, "limit");
+    let mut text = None;
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for (k, v) in &req.query {
+        match k.as_str() {
+            "limit" => {}
+            "q" => text = Some(v.as_str()),
+            _ => pairs.push((k.clone(), v.clone())),
+        }
+    }
+    let Some(text) = text else {
+        return error(400, "missing query parameter `q`");
+    };
+    let query = match Query::parse(text) {
+        Ok(q) => q,
+        Err(e) => return error(400, e),
+    };
+    let filter = match Filter::from_pairs(&pairs) {
+        Ok(f) => f,
+        Err(e) => return error(400, e),
+    };
+    let inner = shared.lock();
+    let items = query::search(&inner.store, &query, &filter)
+        .into_iter()
+        .take(limit.map_or(usize::MAX, |l| l as usize))
+        .map(|(e, hit)| hit_json(&inner.store, e, &hit))
         .collect();
     reply(200, Value::Array(items))
 }

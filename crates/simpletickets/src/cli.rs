@@ -9,10 +9,11 @@ use simpletickets_core::migration::{self, Journal, JournalState};
 use simpletickets_core::ops::{self, NewTicket, Role, Update};
 use simpletickets_core::query::{self, Filter};
 use simpletickets_core::rules::{self, RunOptions, RunReport};
+use simpletickets_core::search::Query;
 use simpletickets_core::state::{audit_log_path, ensure_state_dir};
 use simpletickets_core::store::Store;
 use simpletickets_core::templates;
-use simpletickets_core::view::{doctor_json, ticket_json};
+use simpletickets_core::view::{doctor_json, hit_json, ticket_json};
 use simpletickets_core::write::WriteOptions;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -38,6 +39,8 @@ pub enum Command {
     Create(CreateArgs),
     /// List tickets, optionally filtered
     List(ListArgs),
+    /// Search ticket titles and bodies (words must all match; "quoted phrases" match in order)
+    Search(SearchArgs),
     /// Show one ticket with its derived data
     Show {
         id: String,
@@ -169,6 +172,26 @@ pub struct CreateArgs {
     /// Create in the parent or sub-ticket folder
     #[arg(long, value_parser = ["parent", "sub"])]
     pub role: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct SearchArgs {
+    /// Words and "quoted phrases"; case-insensitive, all must match
+    pub query: String,
+    /// Maximum number of results
+    #[arg(long)]
+    pub limit: Option<usize>,
+    #[arg(long)]
+    pub status: Option<String>,
+    /// todo, in-progress, done or cancelled
+    #[arg(long)]
+    pub category: Option<String>,
+    #[arg(long)]
+    pub assignee: Option<String>,
+    #[arg(long)]
+    pub tag: Option<String>,
     #[arg(long)]
     pub json: bool,
 }
@@ -312,6 +335,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
         Command::Create(args) => create(&ctx, args),
         Command::List(args) => list(&ctx, &args),
+        Command::Search(args) => search(&ctx, &args),
         Command::Show { id, json } => show(&ctx, &id, json),
         Command::SetStatus { id, status } => {
             let store = ctx.scan();
@@ -505,6 +529,42 @@ fn list(ctx: &Context, args: &ListArgs) -> Result<ExitCode, String> {
             t.priority.as_deref().unwrap_or("-"),
             t.title
         );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn search(ctx: &Context, args: &SearchArgs) -> Result<ExitCode, String> {
+    let query = Query::parse(&args.query)?;
+    let named = [
+        ("status", &args.status),
+        ("category", &args.category),
+        ("assignee", &args.assignee),
+        ("tag", &args.tag),
+    ];
+    let pairs: Vec<(String, String)> = named
+        .into_iter()
+        .filter_map(|(k, v)| v.as_ref().map(|v| (k.to_string(), v.clone())))
+        .collect();
+    let filter = Filter::from_pairs(&pairs)?;
+    let store = ctx.scan();
+    let found: Vec<_> = query::search(&store, &query, &filter)
+        .into_iter()
+        .take(args.limit.unwrap_or(usize::MAX))
+        .collect();
+    if args.json {
+        let items: Vec<Value> = found
+            .iter()
+            .map(|(e, hit)| hit_json(&store, e, hit))
+            .collect();
+        println!("{}", Value::Array(items));
+        return Ok(ExitCode::SUCCESS);
+    }
+    for (e, hit) in &found {
+        let t = &e.ticket;
+        println!("{}  {}  {}", t.id, t.status, t.title);
+        if hit.field == simpletickets_core::search::Field::Body {
+            println!("    {}", hit.snippet);
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

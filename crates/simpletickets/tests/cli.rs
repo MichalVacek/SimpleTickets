@@ -84,6 +84,36 @@ fn assignee_create_filter_assign_and_unassign() {
 }
 
 #[test]
+fn search_prints_ranked_hits_with_snippets_and_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    create_id(d, &["Quarterly report", "--body", "Collect the numbers\n"]);
+    let b = create_id(d, &["Send mail", "--body", "Mail the quarterly numbers\n"]);
+    ok(d, &["set-status", &b, "done"]);
+
+    let text = ok(d, &["search", "quarterly"]);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[0].starts_with("ST-1") && lines[0].contains("Quarterly report"),
+        "{text}"
+    );
+    assert!(lines[1].starts_with("ST-2"), "{text}");
+    assert!(lines[2].trim() == "Mail the quarterly numbers", "{text}");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&ok(d, &["search", "\"quarterly numbers\"", "--json"])).unwrap();
+    assert_eq!(json.as_array().unwrap().len(), 1);
+    assert_eq!(json[0]["id"], "ST-2");
+    assert_eq!(json[0]["match_field"], "body");
+
+    assert!(ok(d, &["search", "quarterly", "--status", "todo"]).contains("ST-1"));
+    assert!(!ok(d, &["search", "quarterly", "--status", "todo"]).contains("ST-2"));
+    assert!(ok(d, &["search", "quarterly", "--limit", "1"]).contains("ST-1"));
+    assert!(ok(d, &["search", "zzz"]).is_empty());
+    assert!(!st(d, &["search", "--", "!!"]).status.success());
+}
+
+#[test]
 fn rules_run_after_set_status_and_are_audited() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();

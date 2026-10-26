@@ -42,6 +42,18 @@ pub fn definitions() -> Value {
             "description": "Sort keys, most significant first. Default: due, priority. Tickets without a due date sort last."
         }),
     );
+    let mut search_props = filters.as_object().cloned().unwrap_or_default();
+    search_props.remove("title");
+    search_props.remove("due_by");
+    search_props.remove("fields");
+    search_props.insert(
+        "query".into(),
+        json!({"type": "string", "description": "Words and \"quoted phrases\""}),
+    );
+    search_props.insert(
+        "limit".into(),
+        json!({"type": "integer", "minimum": 1, "description": "Maximum number of results"}),
+    );
     let ticket_props = json!({
         "title": {"type": "string"},
         "status": {"type": "string"},
@@ -70,6 +82,11 @@ pub fn definitions() -> Value {
             "name": "list_tickets",
             "description": "List tickets, optionally filtered. All given filters must match.",
             "inputSchema": {"type": "object", "properties": list_props}
+        },
+        {
+            "name": "search_tickets",
+            "description": "Full-text search over ticket titles and bodies. Case-insensitive; every word must appear as a whole word, and \"quoted phrases\" must appear in order. Best matches first, each with a score and a snippet. The optional filters narrow the results.",
+            "inputSchema": {"type": "object", "properties": search_props, "required": ["query"]}
         },
         {
             "name": "show_ticket",
@@ -111,6 +128,18 @@ pub fn call(backend: &dyn Backend, name: &str, args: &Value) -> Result<Value, St
                 }
             }
             backend.request("GET", &format!("/v1/tickets{}", query_string(&pairs)), None)
+        }
+        "search_tickets" => {
+            let query = match args.get("query").and_then(Value::as_str) {
+                Some(q) if !q.trim().is_empty() => q,
+                _ => return Err("`query` is required".into()),
+            };
+            let mut pairs = vec![("q".to_string(), query.to_string())];
+            pairs.extend(filter_pairs(args)?);
+            if let Some(v) = args.get("limit").filter(|v| !v.is_null()) {
+                pairs.push(("limit".into(), scalar("limit", v)?));
+            }
+            backend.request("GET", &format!("/v1/search{}", query_string(&pairs)), None)
         }
         "show_ticket" => backend.request("GET", &format!("/v1/tickets/{}", ticket_id(args)?), None),
         "create_ticket" => {
@@ -368,6 +397,26 @@ mod tests {
     }
 
     #[test]
+    fn search_builds_an_encoded_query_with_filters() {
+        let fake = Fake::new(json!([]));
+        call(
+            &fake,
+            "search_tickets",
+            &json!({"query": "\"quarterly report\" draft", "assignee": "ann", "limit": 3}),
+        )
+        .unwrap();
+        let path = fake.seen.borrow()[0].1.clone();
+        assert!(
+            path.starts_with("/v1/search?q=%22quarterly%20report%22%20draft"),
+            "{path}"
+        );
+        assert!(path.contains("assignee=ann"));
+        assert!(path.contains("limit=3"));
+        assert!(call(&fake, "search_tickets", &json!({"query": " "})).is_err());
+        assert!(call(&fake, "search_tickets", &json!({})).is_err());
+    }
+
+    #[test]
     fn update_sends_changes_without_the_id() {
         let fake = Fake::new(json!({}));
         call(
@@ -411,6 +460,7 @@ mod tests {
             names,
             [
                 "list_tickets",
+                "search_tickets",
                 "show_ticket",
                 "create_ticket",
                 "update_ticket",

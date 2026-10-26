@@ -2,6 +2,7 @@
 
 use crate::doctor;
 use crate::frontmatter::Document;
+use crate::search::Hit;
 use crate::store::{IndexedTicket, Store};
 use crate::warnings;
 use serde_json::{json, Value};
@@ -41,6 +42,15 @@ pub fn ticket_json(store: &Store, entry: &IndexedTicket, detail: bool) -> Value 
             .map(|d| d.body().to_string());
         v["body"] = json!(body);
     }
+    v
+}
+
+/// A search hit: the ticket plus its `score`, matching `field` and `snippet`.
+pub fn hit_json(store: &Store, entry: &IndexedTicket, hit: &Hit) -> Value {
+    let mut v = ticket_json(store, entry, false);
+    v["score"] = json!(hit.score);
+    v["match_field"] = json!(hit.field.key());
+    v["snippet"] = json!(hit.snippet);
     v
 }
 

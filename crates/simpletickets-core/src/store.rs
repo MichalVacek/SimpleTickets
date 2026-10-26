@@ -4,10 +4,12 @@
 //! Blocked state and parent status are derived here and never stored.
 
 use crate::config::{Category, Config, RootKind};
+use crate::frontmatter::Document;
 use crate::hash::content_hash;
 use crate::known::{self, KnownEntry};
+use crate::search::{Hit, Query, SearchIndex};
 use crate::state::{is_within, known_ids_path};
-use crate::ticket::{has_ticket_marker, Ticket};
+use crate::ticket::{has_ticket_marker, ParseError, Ticket};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -20,6 +22,8 @@ pub struct IndexedTicket {
     pub path: PathBuf,
     /// Hash of the full file content at scan time.
     pub hash: String,
+    /// The Markdown after the frontmatter, as read at scan time.
+    pub body: String,
 }
 
 /// A file that could not be turned into a ticket. It is skipped, never rewritten.
@@ -66,6 +70,7 @@ pub struct Store {
     offline: BTreeMap<PathBuf, String>,
     /// Tickets of offline roots, kept from the previous scan and left untouched.
     frozen: BTreeSet<String>,
+    search: SearchIndex,
 }
 
 impl Store {
@@ -138,13 +143,17 @@ impl Store {
             let modified = fs::metadata(&path)
                 .and_then(|m| m.modified())
                 .unwrap_or_else(|_| SystemTime::now());
-            match Ticket::parse(&text) {
-                Ok(ticket) => by_id.entry(ticket.id.clone()).or_default().push((
+            let parsed = Document::parse(text.as_str())
+                .map_err(ParseError::from)
+                .and_then(|doc| Ticket::from_document(&doc).map(|t| (t, doc.body().to_string())));
+            match parsed {
+                Ok((ticket, body)) => by_id.entry(ticket.id.clone()).or_default().push((
                     modified,
                     IndexedTicket {
                         hash: content_hash(text.as_bytes()),
                         ticket,
                         path,
+                        body,
                     },
                 )),
                 Err(e) => problems.push(ScanProblem::Malformed {
@@ -203,7 +212,15 @@ impl Store {
             known_error,
             offline,
             frozen,
+            search: SearchIndex::default(),
         };
+        store.search = SearchIndex::build(store.tickets.values().map(|e| {
+            (
+                e.ticket.id.as_str(),
+                e.ticket.title.as_str(),
+                e.body.as_str(),
+            )
+        }));
         store.index_links();
         store
     }
@@ -230,6 +247,11 @@ impl Store {
         self.children = children;
         self.blocks = blocks;
         self.related_by = related_by;
+    }
+
+    /// Tickets whose title or body match `query`, best first.
+    pub fn search(&self, query: &Query) -> Vec<Hit> {
+        self.search.search(query)
     }
 
     pub fn config(&self) -> &Config {

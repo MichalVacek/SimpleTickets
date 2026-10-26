@@ -185,6 +185,65 @@ fn assignee_through_the_api() {
 }
 
 #[test]
+fn search_by_text_through_both_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::write(
+        d.join("a.md"),
+        "---\nid: ST-1\ntitle: Quarterly report\nstatus: todo\nassignee: Ann\n---\nCollect numbers, write the draft.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("b.md"),
+        "---\nid: ST-2\ntitle: Send mail\nstatus: done\n---\nMail the quarterly numbers\n",
+    )
+    .unwrap();
+    let api = start(d, false, SLOW);
+    let ids = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let (status, hits) = api.get("/v1/search?q=Quarterly");
+    assert_eq!(status, 200, "{hits}");
+    assert_eq!(ids(&hits), ["ST-1", "ST-2"]);
+    assert!(hits[0]["score"].as_u64().unwrap() > hits[1]["score"].as_u64().unwrap());
+    assert_eq!(hits[1]["match_field"], "body");
+    assert!(hits[1]["snippet"]
+        .as_str()
+        .unwrap()
+        .contains("quarterly numbers"));
+
+    assert_eq!(
+        ids(&api.get("/v1/tickets?q=quarterly&status=done").1),
+        ["ST-2"]
+    );
+    assert_eq!(
+        ids(&api.get("/v1/search?q=quarterly&assignee=ann").1),
+        ["ST-1"]
+    );
+    assert_eq!(
+        ids(&api.get("/v1/tickets?q=%22quarterly%20numbers%22").1),
+        ["ST-2"]
+    );
+    assert_eq!(ids(&api.get("/v1/search?q=quarterly&limit=1").1), ["ST-1"]);
+    assert!(ids(&api.get("/v1/search?q=nothing").1).is_empty());
+    assert_eq!(api.get("/v1/search").0, 400);
+    assert_eq!(api.get("/v1/search?q=%21%21").0, 400);
+    assert_eq!(api.get("/v1/tickets?q=x&bogus=1").0, 400);
+
+    // A new ticket is searchable after the write rescans.
+    api.post(
+        "/v1/tickets",
+        r#"{"title":"Zebra crossing","body":"stripes\n"}"#,
+    );
+    assert_eq!(ids(&api.get("/v1/search?q=stripes").1), ["ST-3"]);
+}
+
+#[test]
 fn rejects_bad_requests() {
     let dir = tempfile::tempdir().unwrap();
     let api = start(dir.path(), false, SLOW);

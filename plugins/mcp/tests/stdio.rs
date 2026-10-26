@@ -130,6 +130,7 @@ fn drives_the_daemon_end_to_end_over_stdio() {
             names,
             [
                 "list_tickets",
+                "search_tickets",
                 "show_ticket",
                 "create_ticket",
                 "update_ticket",
@@ -195,6 +196,17 @@ fn drives_the_daemon_end_to_end_over_stdio() {
         assert_eq!(next["id"], owned_id.as_str());
         let (_, cleared) = plugin.tool("update_ticket", json!({"id": owned_id, "assignee": null}));
         assert!(cleared["assignee"].is_null());
+
+        let (err, found) = plugin.tool("search_tickets", json!({"query": "\"body of ST-2\""}));
+        assert!(!err);
+        assert_eq!(found.as_array().unwrap().len(), 1);
+        assert_eq!(found[0]["id"], "ST-2");
+        assert!(found[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("body of ST-2"));
+        let (err, _) = plugin.tool("search_tickets", json!({"query": "!!"}));
+        assert!(err);
 
         let (err, bad) = plugin.tool("update_ticket", json!({"id": "ST-2", "status": "nonsense"}));
         assert!(err);

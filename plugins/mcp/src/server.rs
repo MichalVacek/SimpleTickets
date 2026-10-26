@@ -167,6 +167,6 @@ mod tests {
         let lines: Vec<&str> = std::str::from_utf8(&out).unwrap().lines().collect();
         assert_eq!(lines.len(), 2);
         let list: Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
     }
 }
