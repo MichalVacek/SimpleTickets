@@ -469,7 +469,10 @@ fn put_config(shared: &Shared, req: &Request) -> Reply {
             return error(500, format!("cannot write config: {e}"));
         }
         shared.rescan_locked(&mut inner, "config");
-        return reply(200, json!({"config": inner.config.to_json()}));
+        return reply(
+            200,
+            json!({"config": inner.config.to_json(), "warnings": plan.warnings}),
+        );
     }
     if !body.migrate {
         return reply(

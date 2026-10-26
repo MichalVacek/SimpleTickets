@@ -114,6 +114,40 @@ fn search_prints_ranked_hits_with_snippets_and_json() {
 }
 
 #[test]
+fn migrate_plan_places_scattered_tickets_and_warns_about_prefix_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let p = create_id(d, &["Spec"]);
+    let c = create_id(d, &["Child", "--parent", &p]);
+    let cfg = d.join("new.yml");
+    std::fs::write(
+        &cfg,
+        "parent_folder: specs\nsubticket_folder: work\nid_prefix: TK\n",
+    )
+    .unwrap();
+    let new = cfg.to_str().unwrap();
+
+    let plan = ok(d, &["migrate", "plan", new]);
+    assert!(
+        plan.contains(&format!("move {p}")) && plan.contains(&format!("move {c}")),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("warning: id_prefix changes from ST to TK"),
+        "{plan}"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&ok(d, &["migrate", "plan", new, "--json"])).unwrap();
+    assert_eq!(json["warnings"].as_array().unwrap().len(), 1);
+
+    let out = ok(d, &["migrate", "apply", new]);
+    assert!(out.contains("warning: id_prefix"), "{out}");
+    assert!(d.join("specs").read_dir().unwrap().count() == 1);
+    assert_eq!(create_id(d, &["After"]), "TK-1");
+    assert!(ok(d, &["list"]).contains("ST-2"));
+}
+
+#[test]
 fn rules_run_after_set_status_and_are_audited() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();

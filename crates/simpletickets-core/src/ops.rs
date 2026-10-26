@@ -576,6 +576,39 @@ mod tests {
     }
 
     #[test]
+    fn creation_after_a_prefix_change_numbers_each_prefix_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.md", &ticket("ST-1", "todo", ""));
+        write(dir.path(), "b.md", &ticket("ST-5", "todo", ""));
+        write(dir.path(), "c.md", &ticket("TK-2", "todo", ""));
+        let tk = Config::parse("id_prefix: TK\n", dir.path()).unwrap();
+        let first = create(&Store::scan(&tk), dir.path(), new("one")).unwrap();
+        assert_eq!(first.id, "TK-3");
+        let second = create(&Store::scan(&tk), dir.path(), new("two")).unwrap();
+        assert_eq!(second.id, "TK-4");
+        let st = Config::parse("id_prefix: ST\n", dir.path()).unwrap();
+        let back = create(&Store::scan(&st), dir.path(), new("three")).unwrap();
+        assert_eq!(back.id, "ST-6");
+        let all = Store::scan(&st).ids();
+        assert_eq!(all.len(), 6);
+        assert!(all.contains("ST-1") && all.contains("ST-5") && all.contains("TK-2"));
+    }
+
+    #[test]
+    fn deleted_ids_of_another_prefix_do_not_block_numbering() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.md", &ticket("ST-1", "todo", ""));
+        let st = Config::default_for(dir.path());
+        Store::scan(&st).record_known().unwrap();
+        fs::remove_file(dir.path().join("a.md")).unwrap();
+        let tk = Config::parse("id_prefix: TK\n", dir.path()).unwrap();
+        let created = create(&Store::scan(&tk), dir.path(), new("x")).unwrap();
+        assert_eq!(created.id, "TK-1");
+        let back = create(&Store::scan(&st), dir.path(), new("y")).unwrap();
+        assert_eq!(back.id, "ST-2");
+    }
+
+    #[test]
     fn create_validates_input() {
         let (dir, store) = setup();
         let d = dir.path();

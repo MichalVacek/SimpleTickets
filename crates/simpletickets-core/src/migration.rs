@@ -2,8 +2,9 @@
 //! resumable apply.
 //!
 //! A migration relocates tickets whose folders changed in the configuration
-//! (`parent_folder`, `subticket_folder`) and rewrites statuses that the new
-//! status mapping no longer knows. Ticket IDs are never touched and links are
+//! (`parent_folder`, `subticket_folder`), places scattered tickets into a
+//! folder that is configured for the first time, and rewrites statuses that
+//! the new status mapping no longer knows. Ticket IDs are never touched and links are
 //! IDs, so they stay valid; a check after completion confirms it.
 //!
 //! The journal is written before the first step and after every step. Every
@@ -13,6 +14,7 @@
 use crate::config::{self, Config};
 use crate::doctor::{self, Issue};
 use crate::hash::content_hash;
+use crate::id::sequence_number;
 use crate::state::{self, is_within, journal_path, resolve};
 use crate::store::Store;
 use crate::ticket::Ticket;
@@ -70,6 +72,8 @@ pub struct Plan {
     pub actions: Vec<Action>,
     /// Changes the plan cannot make, with the reason.
     pub conflicts: Vec<Conflict>,
+    /// Consequences of the new config that need no step but are worth knowing.
+    pub warnings: Vec<String>,
 }
 
 impl Plan {
@@ -130,6 +134,8 @@ pub struct Journal {
     pub missing_targets_before: usize,
     pub steps: Vec<Step>,
     pub conflicts: Vec<Conflict>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
     pub integrity: Option<Integrity>,
 }
 
@@ -164,8 +170,11 @@ pub struct RunOptions {
 /// Computes what moving from the store's config to `new` requires. Touches nothing.
 ///
 /// Tickets inside an old `parent_folder` or `subticket_folder` move to the
-/// new folder of the same kind when it changed. Tickets whose status the new
-/// mapping drops get the first status of their old category.
+/// new folder of the same kind when it changed. When a folder is configured
+/// for the first time, tickets outside the configured folders move into it by
+/// role: a ticket with sub-tickets into `parent_folder`, a ticket with a
+/// `parent` into `subticket_folder`. Tickets whose status the new mapping
+/// drops get the first status of their old category.
 pub fn plan(store: &Store, new: &Config) -> Plan {
     let old = store.config();
     let mut plan = Plan::default();
@@ -193,22 +202,7 @@ pub fn plan(store: &Store, new: &Config) -> Plan {
                 continue;
             }
             let target = to.join(rel);
-            let conflict = if target.exists() {
-                Some(format!("{} already exists", target.display()))
-            } else if let Some(other) = targets.get(&target) {
-                Some(format!(
-                    "{other} moves to the same file {}",
-                    target.display()
-                ))
-            } else if !scanned_by(new, &target) {
-                Some(format!(
-                    "{} would be outside every root and auto-scan folder",
-                    target.display()
-                ))
-            } else {
-                None
-            };
-            match conflict {
+            match target_conflict(new, &targets, &target) {
                 Some(message) => plan.conflicts.push(Conflict {
                     id: id.clone(),
                     message,
@@ -225,6 +219,9 @@ pub fn plan(store: &Store, new: &Config) -> Plan {
             }
         }
     }
+
+    plan_role_moves(store, new, &mut plan, &mut targets, &mut final_path);
+    plan.warnings = prefix_warnings(store, new);
 
     for entry in store.tickets() {
         let t = &entry.ticket;
@@ -251,6 +248,147 @@ pub fn plan(store: &Store, new: &Config) -> Plan {
         }
     }
     plan
+}
+
+/// Why a ticket cannot be moved to `target`, if it cannot.
+fn target_conflict(
+    new: &Config,
+    targets: &BTreeMap<PathBuf, String>,
+    target: &Path,
+) -> Option<String> {
+    if target.exists() {
+        Some(format!("{} already exists", target.display()))
+    } else if let Some(other) = targets.get(target) {
+        Some(format!(
+            "{other} moves to the same file {}",
+            target.display()
+        ))
+    } else if !scanned_by(new, target) {
+        Some(format!(
+            "{} would be outside every root and auto-scan folder",
+            target.display()
+        ))
+    } else {
+        None
+    }
+}
+
+/// Moves tickets into a folder configured for the first time, by role.
+///
+/// Tickets already inside either old folder were placed on purpose and stay.
+fn plan_role_moves(
+    store: &Store,
+    new: &Config,
+    plan: &mut Plan,
+    targets: &mut BTreeMap<PathBuf, String>,
+    final_path: &mut BTreeMap<String, PathBuf>,
+) {
+    let old = store.config();
+    let first_time = |old: &Option<PathBuf>, new: &Option<PathBuf>| match (old, new) {
+        (None, Some(to)) => Some(resolve(to)),
+        _ => None,
+    };
+    let parent_to = first_time(&old.parent_folder, &new.parent_folder);
+    let sub_to = first_time(&old.subticket_folder, &new.subticket_folder);
+    if parent_to.is_none() && sub_to.is_none() {
+        return;
+    }
+    let placed = |path: &Path| {
+        [&old.parent_folder, &old.subticket_folder]
+            .into_iter()
+            .flatten()
+            .any(|f| is_within(path, &resolve(f)))
+    };
+    for entry in store.tickets() {
+        let id = &entry.ticket.id;
+        if final_path.contains_key(id) || placed(&entry.path) {
+            continue;
+        }
+        let is_parent = !store.children_of(id).is_empty();
+        let is_sub = entry.ticket.parent.is_some();
+        let to = match (is_parent, is_sub) {
+            (true, true) => {
+                if parent_to.is_some() || sub_to.is_some() {
+                    plan.conflicts.push(Conflict {
+                        id: id.clone(),
+                        message: "is both a parent and a sub-ticket; place it by hand".into(),
+                    });
+                }
+                continue;
+            }
+            (true, false) => parent_to.as_ref(),
+            (false, true) => sub_to.as_ref(),
+            (false, false) => None,
+        };
+        let Some(to) = to else { continue };
+        if is_within(&entry.path, to) {
+            continue;
+        }
+        if store.is_frozen(id) {
+            plan.conflicts.push(Conflict {
+                id: id.clone(),
+                message: "its root is offline".into(),
+            });
+            continue;
+        }
+        let Some(name) = entry.path.file_name() else {
+            continue;
+        };
+        let target = to.join(name);
+        match target_conflict(new, targets, &target) {
+            Some(message) => plan.conflicts.push(Conflict {
+                id: id.clone(),
+                message,
+            }),
+            None => {
+                targets.insert(target.clone(), id.clone());
+                final_path.insert(id.clone(), target.clone());
+                plan.actions.push(Action::Move {
+                    id: id.clone(),
+                    from: entry.path.clone(),
+                    to: target,
+                });
+            }
+        }
+    }
+}
+
+/// Notes on a changed `id_prefix`: existing IDs are never rewritten.
+fn prefix_warnings(store: &Store, new: &Config) -> Vec<String> {
+    let old = &store.config().id_prefix;
+    if *old == new.id_prefix {
+        return Vec::new();
+    }
+    let ids = store.ids();
+    let foreign: Vec<&String> = ids
+        .iter()
+        .filter(|id| !id.starts_with(&format!("{}-", new.id_prefix)))
+        .collect();
+    let mut warnings = Vec::new();
+    if !foreign.is_empty() {
+        let prefixes: BTreeSet<&str> = foreign
+            .iter()
+            .map(|id| id.split_once('-').map_or("(none)", |(p, _)| p))
+            .collect();
+        warnings.push(format!(
+            "id_prefix changes from {old} to {}: {} existing ticket(s) keep their IDs              (prefixes: {}); only new tickets get {}-n IDs",
+            new.id_prefix,
+            foreign.len(),
+            prefixes.into_iter().collect::<Vec<_>>().join(", "),
+            new.id_prefix
+        ));
+    }
+    let highest = ids
+        .iter()
+        .filter_map(|id| sequence_number(&new.id_prefix, id))
+        .max();
+    if let Some(n) = highest {
+        warnings.push(format!(
+            "tickets with the prefix {} already exist; new IDs continue after {}-{n}",
+            new.id_prefix, new.id_prefix
+        ));
+    }
+    warnings
 }
 
 fn scanned_by(config: &Config, path: &Path) -> bool {
@@ -336,6 +474,7 @@ pub fn begin(dir: &Path, store: &Store, new_yaml: &str) -> Result<Journal, Migra
             })
             .collect(),
         conflicts: plan.conflicts,
+        warnings: plan.warnings,
         integrity: None,
     };
     save(dir, &journal)?;
@@ -625,7 +764,9 @@ statuses:\n  todo: [todo, backlog]\n  in-progress: [doing]\n  done: [done]\n  ca
         let same = Config::parse(OLD, dir.path()).unwrap();
         assert!(plan(&store(dir.path()), &same).is_empty());
         let prefix = Config::parse(&format!("{OLD}id_prefix: XX\n"), dir.path()).unwrap();
-        assert!(plan(&store(dir.path()), &prefix).is_empty());
+        let p = plan(&store(dir.path()), &prefix);
+        assert!(p.is_empty());
+        assert!(!p.warnings.is_empty());
     }
 
     #[test]
@@ -838,6 +979,191 @@ statuses:\n  todo: [todo, backlog]\n  in-progress: [doing]\n  done: [done]\n  ca
         assert!(second.is_complete());
         assert!(second.steps.iter().all(|s| s.state == StepState::Done));
         assert!(second.integrity.unwrap().ok);
+    }
+
+    const FIRST: &str = "parent_folder: specs\nsubticket_folder: work\n";
+
+    /// Tickets scattered over the root with no folders configured.
+    fn scattered() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(d, "random/P-1.md", &ticket("P-1", "todo", ""));
+        write(d, "P-2.md", &ticket("P-2", "todo", ""));
+        write(d, "a/b/T-1.md", &ticket("T-1", "todo", "parent: P-1\n"));
+        write(d, "T-2.md", &ticket("T-2", "todo", "parent: P-2\n"));
+        write(d, "loose.md", &ticket("L-1", "todo", "blocked_by: [T-1]\n"));
+        dir
+    }
+
+    #[test]
+    fn first_time_folders_place_tickets_by_role() {
+        let dir = scattered();
+        let d = dir.path();
+        let before = snapshot(d);
+        let new = Config::parse(FIRST, d).unwrap();
+        let p = plan(&store(d), &new);
+        assert!(p.conflicts.is_empty(), "{:?}", p.conflicts);
+        let moved: BTreeMap<&str, &Path> = p
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Move { id, to, .. } => Some((id.as_str(), to.as_path())),
+                Action::SetStatus { .. } => None,
+            })
+            .collect();
+        assert_eq!(moved.len(), 4);
+        assert!(moved["P-1"].ends_with("specs/P-1.md"));
+        assert!(moved["P-2"].ends_with("specs/P-2.md"));
+        assert!(moved["T-1"].ends_with("work/T-1.md"));
+        assert!(moved["T-2"].ends_with("work/T-2.md"));
+        assert_eq!(snapshot(d), before);
+    }
+
+    #[test]
+    fn first_time_placement_applies_keeps_ids_and_is_then_stable() {
+        let dir = scattered();
+        let d = dir.path();
+        let ids_before: BTreeSet<_> = files_with_ids(d).keys().cloned().collect();
+        let j = begin(d, &store(d), FIRST).unwrap();
+        let done = run(d, j, RunOptions::default()).unwrap();
+        assert!(done.is_complete() && done.integrity.as_ref().unwrap().ok);
+        assert_eq!(
+            fs::read_to_string(d.join("simpletickets.yml")).unwrap(),
+            FIRST
+        );
+
+        let after = files_with_ids(d);
+        assert_eq!(after.keys().cloned().collect::<BTreeSet<_>>(), ids_before);
+        assert_eq!(after["P-1"], "specs/P-1.md");
+        assert_eq!(after["T-1"], "work/T-1.md");
+        assert_eq!(after["L-1"], "loose.md");
+        let s = store(d);
+        assert!(doctor::check(&s).is_clean(), "{}", doctor::check(&s));
+        assert_eq!(s.get("T-1").unwrap().ticket.parent.as_deref(), Some("P-1"));
+
+        let same = Config::parse(FIRST, d).unwrap();
+        assert!(plan(&s, &same).is_empty());
+    }
+
+    #[test]
+    fn first_time_placement_resumes_from_any_interruption() {
+        let reference = scattered();
+        let rd = reference.path();
+        let j = begin(rd, &store(rd), FIRST).unwrap();
+        let steps = j.steps.len();
+        run(rd, j, RunOptions::default()).unwrap();
+        let expected = snapshot(rd);
+        for stop in 0..steps {
+            let dir = scattered();
+            let d = dir.path();
+            let j = begin(d, &store(d), FIRST).unwrap();
+            run(
+                d,
+                j,
+                RunOptions {
+                    max_steps: Some(stop),
+                },
+            )
+            .unwrap();
+            assert!(!fs::read_to_string(d.join("simpletickets.yml")).is_ok_and(|t| t == FIRST));
+            let finished = resume(d, RunOptions::default()).unwrap().unwrap();
+            assert!(finished.is_complete() && finished.integrity.unwrap().ok);
+            assert_eq!(snapshot(d), expected, "stop at {stop}");
+        }
+    }
+
+    #[test]
+    fn first_time_placement_reports_conflicts_without_overwriting() {
+        let dir = scattered();
+        let d = dir.path();
+        write(d, "specs/P-1.md", "taken");
+        write(d, "other/T-2.md", &ticket("T-3", "todo", "parent: P-2\n"));
+        write(d, "both.md", &ticket("B-1", "todo", "parent: P-1\n"));
+        write(d, "child.md", &ticket("C-1", "todo", "parent: B-1\n"));
+        let new = Config::parse(FIRST, d).unwrap();
+        let p = plan(&store(d), &new);
+        let conflict = |id: &str| p.conflicts.iter().find(|c| c.id == id).map(|c| &c.message);
+        assert!(conflict("P-1").unwrap().contains("already exists"));
+        assert!(conflict("B-1")
+            .unwrap()
+            .contains("both a parent and a sub-ticket"));
+        let same_name = [conflict("T-2"), conflict("T-3")];
+        assert_eq!(same_name.iter().flatten().count(), 1);
+        assert!(same_name
+            .iter()
+            .flatten()
+            .any(|m| m.contains("moves to the same file")));
+
+        let j = begin(d, &store(d), FIRST).unwrap();
+        run(d, j, RunOptions::default()).unwrap();
+        assert_eq!(fs::read_to_string(d.join("specs/P-1.md")).unwrap(), "taken");
+        assert!(d.join("random/P-1.md").exists());
+        assert!(d.join("both.md").exists());
+    }
+
+    #[test]
+    fn already_configured_folders_do_not_pull_in_strays() {
+        let dir = project();
+        let d = dir.path();
+        write(d, "stray/S-1.md", &ticket("S-1", "todo", "parent: P-1\n"));
+        let new = Config::parse(&format!("{OLD}id_prefix: XX\n"), d).unwrap();
+        assert!(plan(&store(d), &new).is_empty());
+    }
+
+    #[test]
+    fn tickets_already_in_the_target_or_old_folders_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(d, "specs/P-1.md", &ticket("P-1", "todo", ""));
+        write(d, "T-1.md", &ticket("T-1", "todo", "parent: P-1\n"));
+        write(d, "old/T-2.md", &ticket("T-2", "todo", "parent: P-1\n"));
+        write(d, "simpletickets.yml", "subticket_folder: old\n");
+        let new = Config::parse(FIRST, d).unwrap();
+        let p = plan(&store(d), &new);
+        let ids: Vec<&str> = p.actions.iter().map(Action::id).collect();
+        // T-2 sits in the old sub-ticket folder and follows it to `work`; the
+        // parent is already in `specs`; T-1 is a stray in a configured role.
+        assert_eq!(ids, ["T-2"]);
+    }
+
+    #[test]
+    fn prefix_change_warns_and_keeps_existing_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        write(d, "a.md", &ticket("ST-1", "todo", ""));
+        write(d, "b.md", &ticket("ST-r1a2b3c4", "todo", ""));
+        write(d, "c.md", &ticket("TK-7", "todo", ""));
+        let new = Config::parse("id_prefix: TK\n", d).unwrap();
+        let p = plan(&store(d), &new);
+        assert!(p.is_empty());
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+        assert!(p.warnings[0].contains("2 existing ticket(s) keep their IDs"));
+        assert!(p.warnings[0].contains("prefixes: ST"));
+        assert!(p.warnings[1].contains("continue after TK-7"));
+
+        let j = begin(d, &store(d), "id_prefix: TK\n").unwrap();
+        assert_eq!(j.warnings, p.warnings);
+        let done = run(d, j, RunOptions::default()).unwrap();
+        assert!(done.is_complete());
+        assert_eq!(load(d).unwrap().unwrap().warnings, p.warnings);
+        let ids = store(d).ids();
+        assert!(ids.contains("ST-1") && ids.contains("ST-r1a2b3c4") && ids.contains("TK-7"));
+
+        let same = Config::parse("id_prefix: ST\n", d).unwrap();
+        let back = plan(&store(d), &same).warnings;
+        assert!(back[0].contains("from TK to ST"), "{back:?}");
+        assert!(back[1].contains("continue after ST-1"), "{back:?}");
+    }
+
+    #[test]
+    fn no_prefix_warning_for_an_empty_folder_or_unchanged_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let new = Config::parse("id_prefix: TK\n", d).unwrap();
+        assert!(plan(&store(d), &new).warnings.is_empty());
+        write(d, "a.md", &ticket("ST-1", "todo", ""));
+        let same = Config::parse("", d).unwrap();
+        assert!(plan(&store(d), &same).warnings.is_empty());
     }
 
     #[test]

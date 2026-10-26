@@ -666,6 +666,9 @@ fn print_journal(journal: &Journal, json: bool) {
     for c in &journal.conflicts {
         println!("conflict {}: {}", c.id, c.message);
     }
+    for w in &journal.warnings {
+        println!("warning: {w}");
+    }
     println!("migration {:?}", journal.state);
     if let Some(i) = &journal.integrity {
         println!(
@@ -699,14 +702,18 @@ fn migrate(ctx: &Context, command: MigrateCommand) -> Result<ExitCode, String> {
             let plan = migration::plan(&ctx.scan(), &new);
             if json {
                 println!("{}", json!(plan));
-            } else if plan.is_empty() {
-                println!("no migration needed");
             } else {
+                if plan.is_empty() {
+                    println!("no migration needed");
+                }
                 for a in &plan.actions {
                     println!("{}", migration::describe(a));
                 }
                 for c in &plan.conflicts {
                     println!("conflict {}: {}", c.id, c.message);
+                }
+                for w in &plan.warnings {
+                    println!("warning: {w}");
                 }
             }
             Ok(ExitCode::SUCCESS)

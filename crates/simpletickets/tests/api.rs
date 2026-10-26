@@ -506,6 +506,53 @@ fn config_change_needing_migration_is_refused_then_dry_run_then_applied() {
 }
 
 #[test]
+fn first_time_folders_move_scattered_tickets_by_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write(d, "x/P-1.md", &ticket_text("P-1", "todo", ""));
+    write(d, "y/T-1.md", &ticket_text("T-1", "todo", "parent: P-1\n"));
+    write(d, "loose.md", &ticket_text("L-1", "todo", ""));
+    let api = start(d, false, SLOW);
+    let yaml = "parent_folder: specs\nsubticket_folder: work\n";
+    let body = |dry_run: bool| json!({"yaml": yaml, "dry_run": dry_run}).to_string();
+
+    let (status, dry) = api.post("/v1/migration", &body(true));
+    assert_eq!(status, 200, "{dry}");
+    assert_eq!(dry["plan"]["actions"].as_array().unwrap().len(), 2);
+    assert!(d.join("x/P-1.md").exists());
+
+    let (status, done) = api.post("/v1/migration", &body(false));
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["journal"]["state"], "complete");
+    assert!(d.join("specs/P-1.md").exists() && d.join("work/T-1.md").exists());
+    assert!(d.join("loose.md").exists());
+    assert_eq!(api.get("/v1/tickets/T-1").1["parent"], "P-1");
+    assert_eq!(api.get("/v1/doctor").1["clean"], true);
+}
+
+#[test]
+fn prefix_change_needs_no_migration_but_reports_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write(d, "a.md", &ticket_text("ST-1", "todo", ""));
+    let api = start(d, false, SLOW);
+    let (status, put) = api.call(
+        "PUT",
+        "/v1/config",
+        Some(&json!({"yaml": "id_prefix: TK\n"}).to_string()),
+    );
+    assert_eq!(status, 200, "{put}");
+    let warnings = put["warnings"].as_array().unwrap();
+    assert!(warnings[0].as_str().unwrap().contains("keep their IDs"));
+
+    let (_, created) = api.post("/v1/tickets", r#"{"title":"New"}"#);
+    assert_eq!(created["id"], "TK-1");
+    assert_eq!(api.get("/v1/tickets/ST-1").0, 200);
+    let (_, created) = api.post("/v1/tickets", r#"{"title":"Next"}"#);
+    assert_eq!(created["id"], "TK-2");
+}
+
+#[test]
 fn put_config_with_migrate_flag_applies_the_migration() {
     let dir = migration_project();
     let api = start(dir.path(), false, SLOW);

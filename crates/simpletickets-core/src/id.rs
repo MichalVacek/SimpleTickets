@@ -91,6 +91,15 @@ mod tests {
     }
 
     #[test]
+    fn sequences_are_counted_per_prefix() {
+        let taken = set(&["ST-1", "ST-9", "TK-2", "TK-r1f", "S-4", "STT-30"]);
+        assert_eq!(next_id("ST", &taken, |_| false), "ST-10");
+        assert_eq!(next_id("TK", &taken, |_| false), "TK-3");
+        assert_eq!(next_id("S", &taken, |_| false), "S-5");
+        assert_eq!(next_id("NEW", &taken, |_| false), "NEW-1");
+    }
+
+    #[test]
     fn sequence_number_parsing() {
         assert_eq!(sequence_number("ST", "ST-12"), Some(12));
         assert_eq!(sequence_number("ST", "ST-"), None);
