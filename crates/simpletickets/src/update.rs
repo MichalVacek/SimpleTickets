@@ -48,12 +48,10 @@ impl Default for GithubFetcher {
 
 impl Fetcher for GithubFetcher {
     fn latest(&self) -> Result<Release, String> {
-        let client: ureq::Agent = ureq::Agent::config_builder()
+        let mut response = ureq::get(&self.url)
+            .config()
             .timeout_global(Some(REQUEST_TIMEOUT))
             .build()
-            .into();
-        let mut response = client
-            .get(&self.url)
             .header("Accept", "application/vnd.github+json")
             .call()
             .map_err(|e| e.to_string())?;
