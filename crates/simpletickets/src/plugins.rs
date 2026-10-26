@@ -19,8 +19,11 @@ pub enum PluginsCommand {
     Enable { name: String },
     /// Disable a plugin in simpletickets.yml
     Disable { name: String },
-    /// Check that the enabled plugins can be started
+    /// Check that the enabled plugins can be started and show what the running daemon reports
     Status {
+        /// Daemon address (default: the SIMPLETICKETS_URL variable or http://127.0.0.1:7878)
+        #[arg(long)]
+        url: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -163,7 +166,7 @@ pub fn run(
             println!("{name} disabled; a running daemon stops it on its next config check");
             Ok(ExitCode::SUCCESS)
         }
-        PluginsCommand::Status { json } => {
+        PluginsCommand::Status { url, json } => {
             let rows: Vec<Value> = found
                 .iter()
                 .filter(|f| enabled(&f.name))
@@ -174,9 +177,20 @@ pub fn run(
                 .iter()
                 .filter(|n| !found.iter().any(|f| &f.name == *n))
                 .collect();
+            let live = fetch_live(dir, url);
+            let live_of = |name: &str| {
+                live.as_ref()
+                    .ok()
+                    .and_then(|l| l.iter().find(|r| r["name"] == name))
+                    .cloned()
+            };
             let broken = rows.iter().filter(|r| !r["problem"].is_null()).count() + missing.len();
             if json {
-                println!("{}", json!({"plugins": rows, "missing": missing}));
+                let daemon = live.as_ref().ok();
+                println!(
+                    "{}",
+                    json!({"plugins": rows, "missing": missing, "daemon": daemon})
+                );
             } else {
                 if rows.is_empty() && missing.is_empty() {
                     println!("no plugins enabled");
@@ -186,7 +200,21 @@ pub fn run(
                     let state = row["problem"]
                         .as_str()
                         .map_or_else(|| "ready".to_string(), |p| format!("not ready: {p}"));
-                    println!("{:<16} {:<12} {state}", text("name"), text("kind"));
+                    let running = live_of(&text("name")).map_or_else(String::new, |l| {
+                        let pid = l["pid"]
+                            .as_u64()
+                            .map_or(String::new(), |p| format!(" pid={p}"));
+                        format!(
+                            " | daemon: {}{pid} restarts={} crashes={}",
+                            l["state"].as_str().unwrap_or("-"),
+                            l["restarts"],
+                            l["crashes"]
+                        )
+                    });
+                    println!("{:<16} {:<12} {state}{running}", text("name"), text("kind"));
+                }
+                if let Err(e) = &live {
+                    println!("daemon: {e}");
                 }
                 for name in missing {
                     println!(
@@ -202,4 +230,37 @@ pub fn run(
             })
         }
     }
+}
+
+/// The daemon's `GET /v1/plugins`, or why it could not be read.
+fn fetch_live(dir: &Path, url: Option<String>) -> Result<Vec<Value>, String> {
+    let url = url
+        .or_else(|| {
+            std::env::var("SIMPLETICKETS_URL")
+                .ok()
+                .filter(|u| !u.is_empty())
+        })
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", crate::daemon::DEFAULT_PORT));
+    let token = std::fs::read_to_string(simpletickets_core::state::token_path(dir))
+        .map_err(|e| format!("not queried (no token file: {e})"))?;
+    let mut response = ureq::get(format!("{}/v1/plugins", url.trim_end_matches('/')))
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(3)))
+        .http_status_as_error(false)
+        .build()
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .call()
+        .map_err(|_| format!("not running at {url}"))?;
+    if !response.status().is_success() {
+        return Err(format!("{url} answered {}", response.status().as_u16()));
+    }
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| format!("unreadable answer from {url}: {e}"))?;
+    let body: Value =
+        serde_json::from_str(&text).map_err(|e| format!("unreadable answer from {url}: {e}"))?;
+    body.as_array()
+        .cloned()
+        .ok_or_else(|| format!("unexpected answer from {url}"))
 }

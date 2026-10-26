@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use simpletickets_core::config::{self, Config};
 use simpletickets_core::migration::{self, MigrationError};
 use simpletickets_core::ops::{self, NewTicket, OpError, Update};
+use simpletickets_core::plugin::{self, Kind};
 use simpletickets_core::query::{self, Filter};
 use simpletickets_core::search::Query;
 use simpletickets_core::templates;
@@ -253,10 +254,11 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
             let limit = num_param(req, "limit").unwrap_or(100) as usize;
             reply(200, Value::Array(shared.audit.tail(limit)))
         }
+        (["v1", "plugins"], "GET") => list_plugins(shared),
         (["v1", "templates"], "GET") => reply(200, json!(templates::list(&shared.dir))),
         (
             ["v1", "health" | "parents" | "tickets" | "search" | "rescan" | "doctor" | "config"
-            | "migration" | "events" | "audit" | "templates" | "tombstones"]
+            | "migration" | "events" | "audit" | "templates" | "tombstones" | "plugins"]
             | ["v1", "migration", "resume"]
             | ["v1", "tickets" | "tombstones", _]
             | ["v1", "tickets", _, "reassign-id"],
@@ -264,6 +266,69 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
         ) => error(405, "method not allowed"),
         _ => error(404, format!("no such route: {} {}", req.method, req.path)),
     }
+}
+
+/// Every plugin found, with its manifest data and, for enabled services, what the
+/// supervisor knows.
+fn list_plugins(shared: &Shared) -> Reply {
+    let enabled = shared.lock().config.plugins.clone();
+    let found = plugin::discover(&shared.plugin_dirs);
+    let runtime = shared
+        .plugins
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let mut rows: Vec<Value> = Vec::new();
+    for f in &found {
+        let is_enabled = enabled.contains(&f.name);
+        let mut row = match &f.manifest {
+            Ok(m) => m.to_json(),
+            Err(_) => json!({"name": f.name}),
+        };
+        let map = row.as_object_mut().expect("object");
+        map.insert("enabled".into(), json!(is_enabled));
+        map.insert("source".into(), json!(f.source.as_str()));
+        map.insert("dir".into(), json!(f.dir.display().to_string()));
+        map.insert("valid".into(), json!(f.manifest.is_ok()));
+        map.insert("problem".into(), json!(f.manifest.as_ref().err()));
+        let live = runtime.get(&f.name);
+        let state = match (&f.manifest, is_enabled, live) {
+            (_, false, _) => "disabled",
+            (Ok(m), true, None) if m.kind == Kind::StdioClient => "client",
+            (_, true, None) => "pending",
+            (_, true, Some(rt)) => rt.state.as_str(),
+        };
+        map.insert("state".into(), json!(state));
+        let live = live.map_or_else(
+            || crate::supervisor::Runtime::idle().to_json(),
+            |rt| rt.to_json(),
+        );
+        for (k, v) in live.as_object().expect("object") {
+            if k != "state" {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        rows.push(row);
+    }
+    for name in enabled
+        .iter()
+        .filter(|n| !found.iter().any(|f| &f.name == *n))
+    {
+        let mut row = json!({"name": name, "enabled": true, "valid": false,
+                             "problem": "enabled but not installed", "state": "failed"});
+        let map = row.as_object_mut().expect("object");
+        for (k, v) in crate::supervisor::Runtime::idle()
+            .to_json()
+            .as_object()
+            .expect("object")
+        {
+            if k != "state" {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        rows.push(row);
+    }
+    reply(200, Value::Array(rows))
 }
 
 fn num_param(req: &Request, key: &str) -> Option<u64> {

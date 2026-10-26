@@ -6,6 +6,7 @@ pub mod daemon;
 pub mod events;
 pub mod logger;
 pub mod plugins;
+pub mod supervisor;
 pub mod token;
 pub mod update;
 pub mod webhooks;

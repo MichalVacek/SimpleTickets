@@ -85,6 +85,10 @@ fn log_entry(kind: &str, data: &Value) -> (Level, String) {
         }
         "ticket.status_changed" => &["id", "from", "to", "source"],
         "tombstone.forgotten" => &["id"],
+        "plugin.started" => &["name", "pid", "restarts"],
+        "plugin.stopped" => &["name", "reason"],
+        "plugin.crashed" => &["name", "exit", "error", "crashes", "will_restart"],
+        "plugin.failed" => &["name", "reason", "crashes"],
         _ => &[],
     };
     let pairs: Vec<(&str, String)> = keys
@@ -93,7 +97,8 @@ fn log_entry(kind: &str, data: &Value) -> (Level, String) {
         .collect();
     let level = match kind {
         "state.error" | "config.invalid" | "migration.error" => Level::Error,
-        "root.offline" | "lease.lost" | "warning.raised" => Level::Warn,
+        "root.offline" | "lease.lost" | "warning.raised" | "plugin.crashed" => Level::Warn,
+        "plugin.failed" => Level::Error,
         "rule.applied" => match data.get("level").and_then(Value::as_str) {
             Some("warn") => Level::Warn,
             _ => Level::Info,

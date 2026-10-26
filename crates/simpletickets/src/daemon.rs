@@ -3,6 +3,7 @@
 use crate::api;
 use crate::events::{self, Events};
 use crate::logger::Logger;
+use crate::supervisor::{self, Policy, Runtime};
 use crate::token;
 use crate::update::{self, Release, UpdateCheck};
 use crate::webhooks::{self, Backoff};
@@ -13,13 +14,14 @@ use simpletickets_core::config::{Config, CONFIG_FILE};
 use simpletickets_core::diff;
 use simpletickets_core::lease::{self, Lease};
 use simpletickets_core::migration::{self, Journal, MigrationError};
+use simpletickets_core::plugin::{self, Source};
 use simpletickets_core::rules::{self, RunOptions};
 use simpletickets_core::state::{
     audit_log_path, ensure_state_dir, is_within, token_path, STATE_DIR,
 };
 use simpletickets_core::store::Store;
 use simpletickets_core::VERSION;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +59,10 @@ pub struct Options {
     pub event_backlog: usize,
     /// Retry policy for webhook deliveries.
     pub webhook_backoff: Backoff,
+    /// The per-user plugins folder searched after the tickets folder's own.
+    pub user_plugins_dir: Option<PathBuf>,
+    /// Restart policy for service plugins.
+    pub plugin_policy: Policy,
     pub logger: Arc<Logger>,
 }
 
@@ -74,6 +80,8 @@ impl Options {
             lease_ttl: lease::DEFAULT_TTL,
             event_backlog: events::DEFAULT_BACKLOG,
             webhook_backoff: Backoff::default(),
+            user_plugins_dir: plugin::user_plugins_dir(),
+            plugin_policy: Policy::default(),
             logger: Arc::new(Logger::discard()),
         }
     }
@@ -118,6 +126,10 @@ pub struct Shared {
     pub events: Events,
     pub audit: AuditLog,
     pub stop: AtomicBool,
+    /// Where plugin manifests are searched, in priority order.
+    pub plugin_dirs: Vec<(Source, PathBuf)>,
+    /// Runtime state of the service plugins the supervisor manages.
+    pub plugins: Mutex<BTreeMap<String, Runtime>>,
     token: String,
     inner: Mutex<Inner>,
     scheduler: Mutex<Option<Sender<Message>>>,
@@ -147,6 +159,14 @@ impl Shared {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// The enabled plugin names, or `None` while a scan holds the state.
+    pub fn enabled_plugins(&self) -> Option<Vec<String>> {
+        self.inner
+            .try_lock()
+            .ok()
+            .map(|inner| inner.config.plugins.clone())
     }
 
     /// True while this daemon holds the lease and so may run the rules.
@@ -326,6 +346,8 @@ pub struct Running {
     token_file: PathBuf,
     tx: Sender<Message>,
     threads: Vec<JoinHandle<()>>,
+    plugins_stop: Arc<AtomicBool>,
+    supervisor: Option<JoinHandle<()>>,
 }
 
 impl Running {
@@ -336,6 +358,11 @@ impl Running {
     /// Stops the scheduler and workers, waits for them, releases the lease and flushes the log.
     pub fn stop(self) {
         let logger = self.shared.logger.clone();
+        logger.info("stopping: stopping plugins");
+        self.plugins_stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.supervisor {
+            let _ = t.join();
+        }
         logger.info("stopping: draining workers");
         self.shared.stop.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Message::Stop);
@@ -378,6 +405,8 @@ pub fn start(options: Options) -> Result<Running, String> {
         events: Events::new(logger.clone(), options.event_backlog),
         audit: AuditLog::new(audit_log_path(&dir)),
         stop: AtomicBool::new(false),
+        plugin_dirs: plugin::search_dirs(&dir, options.user_plugins_dir.clone()),
+        plugins: Mutex::new(BTreeMap::new()),
         token,
         scheduler: Mutex::new(None),
         update: Mutex::new(None),
@@ -441,12 +470,21 @@ pub fn start(options: Options) -> Result<Running, String> {
         threads.push(thread::spawn(move || run_update_checks(&shared, &check)));
     }
     logger.info(&format!("listening addr={addr}"));
+    let plugins_stop = Arc::new(AtomicBool::new(false));
+    let supervisor = {
+        let (shared, stop) = (shared.clone(), plugins_stop.clone());
+        let url = format!("http://127.0.0.1:{}", addr.port());
+        let (token_file, policy) = (token_file.clone(), options.plugin_policy);
+        thread::spawn(move || supervisor::run(&shared, url, token_file, policy, &stop))
+    };
     Ok(Running {
         addr,
         shared,
         token_file,
         tx,
         threads,
+        plugins_stop,
+        supervisor: Some(supervisor),
     })
 }
 

@@ -86,4 +86,66 @@ plugins:
 | `simpletickets plugins list [--json]` | Every plugin found, with version, kind, enabled or disabled, source (`tickets` or `user`) and, for a broken manifest, the problem |
 | `simpletickets plugins enable NAME` | Adds the plugin to `plugins.enabled`; refuses an unknown name or an invalid manifest |
 | `simpletickets plugins disable NAME` | Removes it |
-| `simpletickets plugins status [--json]` | Checks every enabled plugin: manifest valid, API version supported, required environment variables set, command found. Exits non-zero when one is not ready |
+| `simpletickets plugins status [--url URL] [--json]` | Checks every enabled plugin: manifest valid, API version supported, required environment variables set, command found. Exits non-zero when one is not ready. When a daemon answers at `--url` (default `$SIMPLETICKETS_URL` or `http://127.0.0.1:7878`) it also shows the daemon's view: state, pid, restarts, crashes |
+
+## Service plugins
+
+The daemon starts every enabled `service` plugin once the API is listening, and stops them first when it shuts down. Plugins are found when the plugin is started; a changed manifest takes effect the next time the plugin is enabled or the daemon starts.
+
+### Starting
+
+Before starting, the daemon checks that the manifest is valid, its `api_version` includes the daemon's, every name in `env` is set, and the command exists. A plugin that fails a check is not started: its state is `failed`, the reason is in `error`, and a `plugin.failed` event is published. Such a plugin is checked again when the enabled list changes.
+
+The process is started with a cleared environment, to keep the daemon's own variables (and any secrets in them) away from plugins. It receives:
+
+- a small base set: `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TMPDIR`, `TMP`, `TEMP`, `TZ`, `SHELL` and the Windows system variables (`SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC`, `PATHEXT`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`), when set;
+- the variables named in the manifest's `env`;
+- the daemon's connection info:
+
+| Variable | Value |
+|---|---|
+| `SIMPLETICKETS_URL` | API address, for example `http://127.0.0.1:7878` |
+| `SIMPLETICKETS_TOKEN_FILE` | Path of the token file; the token is read from it |
+| `SIMPLETICKETS_TOKEN` | The token itself, only with `token: env` |
+| `SIMPLETICKETS_DIR` | The tickets folder |
+| `SIMPLETICKETS_PLUGIN_NAME`, `SIMPLETICKETS_PLUGIN_DIR` | The plugin's name and folder |
+| `SIMPLETICKETS_ACTOR` | `plugin:<name>`, the value to send as [`X-SimpleTickets-Actor`](api.md#actors) |
+| `SIMPLETICKETS_API_VERSION` | The API version the daemon serves |
+
+Standard input is closed. Because `${` introduces a placeholder in `args` and `health.url`, shell variable syntax like `${VAR}` cannot be used there; `$VAR` is fine.
+
+### Output
+
+Each line the plugin writes to standard output or standard error goes to the daemon log at `info` level, prefixed with `[plugin:<name>]`; standard error lines carry `(stderr)` after the prefix. Lines longer than 8 KiB are cut. The token is never logged.
+
+### Crashes and restarts
+
+A service is expected to keep running, so any exit the daemon did not ask for, with any exit code, is a crash.
+
+- After a crash the daemon waits and starts it again. The wait is 1 second after the first crash, doubling with each crash inside the window up to 30 seconds.
+- Five crashes within 60 seconds mark the plugin `failed`: it is not restarted again until it is disabled and enabled, or the daemon restarts.
+- Failing to start the process at all counts as a crash.
+
+### Stopping
+
+When a plugin is disabled, or the daemon shuts down (`SIGINT`, `SIGTERM`, Ctrl-C), the daemon asks the process to exit and waits up to 5 seconds before killing it. On Unix the request is `SIGTERM`; on Windows there is no equivalent for a console-less child, so the process is terminated at once. Plugins stop before the API stops accepting requests, so they can finish their last calls. Only the plugin's own process is signalled, not processes it started.
+
+### Health checks
+
+With `health.url` set, the daemon sends a GET every `interval_seconds` while the plugin runs. A `2xx` answer within `timeout_seconds` is healthy. The result is the `healthy` field of the status (`null` until the first check); a failing check is logged at `warn`. A health check never restarts the process: a plugin that hangs but stays alive reports `healthy: false`.
+
+### Status and events
+
+`GET /v1/plugins` and `simpletickets plugins status` report each plugin's state:
+
+| State | Meaning |
+|---|---|
+| `disabled` | Not in `plugins.enabled` |
+| `client` | Enabled `stdio-client` plugin; its client runs it |
+| `pending` | Enabled service the supervisor has not looked at yet |
+| `starting`, `running` | |
+| `backoff` | Crashed, waiting to restart |
+| `failed` | Could not be started, or crashed too often |
+| `stopped` | Stopped by the supervisor and about to disappear from the list |
+
+The events `plugin.started`, `plugin.stopped`, `plugin.crashed` and `plugin.failed` are published on the [event stream](api.md#event-types).

@@ -92,7 +92,26 @@ Search results add `score` (number), `match_field` (`title` or `body`) and `snip
 | `POST /v1/migration/resume` | | `{journal}`; `404` when nothing is unfinished |
 | `GET /v1/events` | query: `since`, `wait`, `stream` | an [event page](#polling) |
 | `GET /v1/audit` | query: `limit` (default 100) | list of `{ts, rule, id, field, from, to, reason, level}`, oldest first |
+| `GET /v1/plugins` | | list of [plugin](#plugins) objects |
 | `GET /v1/templates` | | list of template names |
+
+## Plugins
+
+`GET /v1/plugins` lists every plugin found in the tickets folder and the user plugins folder, plus enabled names that are not installed. See [plugins.md](plugins.md) for manifests and supervision.
+
+| Field | Meaning |
+|---|---|
+| `name`, `version`, `description`, `api_version`, `kind`, `command`, `args`, `working_dir`, `env`, `token`, `health`, `capabilities` | From the manifest; only `name` for an invalid one |
+| `enabled` | Listed in `plugins.enabled` |
+| `source` | `tickets` or `user` |
+| `dir` | The plugin folder |
+| `valid`, `problem` | Whether the manifest parsed, and the error if not |
+| `state` | `disabled`, `client`, `pending`, `starting`, `running`, `backoff`, `failed` or `stopped` |
+| `pid`, `started_at` | Of the current process; null when none runs |
+| `restarts`, `crashes` | Since the plugin was enabled |
+| `last_exit` | How the last process ended, for example `exit code 1` |
+| `error` | Why the plugin is `failed` or could not start; null otherwise |
+| `healthy` | Result of the last health check; null without a check |
 
 ## Events
 
@@ -197,6 +216,10 @@ Ticket events are produced by comparing the ticket index before and after every 
 | `lease.acquired` | no fields |
 | `state.error` | `message`; a state file next to the tickets could not be updated |
 | `update.available` | `current`, `latest`, `url` |
+| `plugin.started` | `name`, `pid`, `restarts` (restarts since the plugin was enabled); a service plugin's process was started |
+| `plugin.stopped` | `name`, `reason` (`disabled` or `shutdown`); the supervisor stopped the process |
+| `plugin.crashed` | `name`, `exit` (for example `exit code 2`, or `signal 9`; null when the process could not be started), `error` (why it could not be started, else null), `crashes` (within the window), `will_restart`, `restart_in_ms` (null when it will not restart) |
+| `plugin.failed` | `name`, `reason`, `crashes`; the plugin will not be started again until it is re-enabled. Also sent, with `crashes` 0, for an enabled plugin that failed its start checks |
 
 Within one scan the order is: `config.*`, `migration.suggested`, `root.*`, the ticket events found in the files as they were scanned (`source` `api` or `scan`), `rule.applied` and the ticket events caused by rules (`source` `rule`), `warning.raised`, `state.error`, then `scan`.
 
