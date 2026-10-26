@@ -228,7 +228,6 @@ Each matching event is sent as `POST` to the URL with the [event envelope](#enve
 | Header | Value |
 |---|---|
 | `Content-Type` | `application/json` |
-| `User-Agent` | `simpletickets/<version>` |
 | `X-SimpleTickets-Api-Version` | `1` |
 | `X-SimpleTickets-Event` | The event `type` |
 | `X-SimpleTickets-Delivery` | `<stream>-<seq>`, the same for every retry of one event |

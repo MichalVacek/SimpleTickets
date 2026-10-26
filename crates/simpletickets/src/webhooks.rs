@@ -9,7 +9,6 @@ use crate::events::Gap;
 use serde_json::Value;
 use simpletickets_core::config::Webhook;
 use simpletickets_core::hash::hmac_sha256_hex;
-use simpletickets_core::VERSION;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
@@ -215,22 +214,19 @@ fn deliver(shared: &Shared, hook: &Webhook, stream: &str, event: &Value, backoff
         },
     };
     let body = event.to_string();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(backoff.timeout))
-        .http_status_as_error(false)
-        .max_redirects(0)
-        .build()
-        .into();
     let delivery_id = format!("{stream}-{seq}");
     for attempt in 1..=backoff.attempts.max(1) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs())
             .to_string();
-        let mut request = agent
-            .post(&hook.url)
+        let mut request = ureq::post(&hook.url)
+            .config()
+            .timeout_global(Some(backoff.timeout))
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .build()
             .header("Content-Type", "application/json")
-            .header("User-Agent", format!("simpletickets/{VERSION}"))
             .header(API_VERSION_HEADER, API_VERSION.to_string())
             .header(EVENT_HEADER, kind)
             .header(DELIVERY_HEADER, &delivery_id)
