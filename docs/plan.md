@@ -74,7 +74,6 @@ plugins/
 
 ## Open questions
 
-- Event stream contract and API versioning (slice 8 starts at `/v1`).
 - Plugin discovery and supervision (the MCP plugin is started by its client; supervision comes later).
 - Windows as a real service, signed releases, musl builds.
 - Release archives: `release.yml` publishes the assets the installers expect; it has not run yet (no tag pushed). Windows and Linux installs are untested on real machines.

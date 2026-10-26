@@ -90,12 +90,16 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 - A sub-ticket starting under a done or cancelled parent either reopens the parent with a warning (`reopen`, default) or is refused by the CLI and API (`refuse`), configured by `subticket_under_finished_parent`.
 - Rule warnings are persisted in `.simpletickets/warnings.json`, exposed by doctor and announced with `warning.raised`. Conditions clear with their cause; events are kept as capped history.
 - Duplicate IDs: the older file (modification time, then path) keeps the ID in the index, the copies are conflicted and reported by doctor; `reassign-id` gives a copy a new ID by rewriting only its frontmatter `id` with compare-and-swap.
+- Event stream contract (see [api.md](api.md)): envelope `{seq, time, type, data}`, with `seq` consecutive within one daemon run; per-type payloads; in-order, at-least-once delivery over long polling. The backlog is in memory and its size is set with `--event-backlog` (default 1000). A reader that fell behind it, or holds a cursor from before a restart, is told through `gap`, `gap_reason`, `oldest` and `stream` and must resync: take `next`, reload state through the list routes, continue from the cursor.
+- Ticket-level events (`ticket.created`, `ticket.updated`, `ticket.status_changed`, `ticket.moved`, `ticket.deleted`) come from diffing the previous and the new ticket index on every scan, so one code path covers API writes, rule writes, command line writes and hand edits. The `source` field (`api`, `rule`, `scan`) is best effort. Edits between two scans can collapse into one event.
+- API versioning: the version is the integer in the path (`/v1`) and is reported as `api_version` by health and in the `X-SimpleTickets-Api-Version` header. Within a version changes are additive only; a breaking change goes to `/v2` and `/v1` stays for at least 12 months. Clients ignore unknown fields and event types.
+- Webhooks are core, config-driven and outgoing only (`webhooks` in `simpletickets.yml`: `url`, event globs, `secret_env`). Bodies are the event envelope, signed with HMAC-SHA256 over `timestamp.body`; the secret is read from a named environment variable and never stored. Only `http` and `https` URLs are accepted, local and private targets are allowed. Delivery has its own queue and threads per webhook, retries with capped backoff, and never blocks the API or the rules; a failed event is dropped after the last attempt and logged. It stays at-least-once and not durable; durable consumers use the event stream.
 
 ## Open questions
 
 - Offline detection is per root: an unreadable subfolder inside a readable root is reported by doctor, but its tickets are covered by tombstones only, not frozen.
 - The lease compares heartbeats with the local clock, so a large clock difference between machines sharing a folder can make a live lease look stale. Should it carry a host name, or use file locks where the file system supports them?
-- Event stream contract and API versioning for out-of-process plugins.
+- Durable webhook delivery (an on-disk queue that survives a daemon restart) and a way to replay missed events, if a receiver ever needs more than at-least-once while the daemon is up.
 - Plugin discovery, install and lifecycle (who starts and supervises plugin processes).
 - Config schema: tags with custom logging, status-to-category mapping, roots, auto-scan folders.
 - Daemon packaging per OS (launchd first) and the Docker polling fallback.
