@@ -735,3 +735,69 @@ fn review_status_and_finished_parent_policy_through_the_api() {
     );
     assert_eq!(api.get("/v1/tickets/ST-1").1["status"], "done");
 }
+
+#[test]
+fn rule_warnings_are_persisted_exposed_by_doctor_and_announced() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.md", &ticket_text("A", "todo", ""));
+    write(
+        dir.path(),
+        "b.md",
+        &ticket_text("B", "in-progress", "blocked_by: [A]\n"),
+    );
+    write(dir.path(), "p.md", &ticket_text("P", "done", ""));
+    write(
+        dir.path(),
+        "c.md",
+        &ticket_text("C", "in-progress", "parent: P\n"),
+    );
+    let api = start(dir.path(), false, SLOW);
+    let rules = |v: &serde_json::Value| -> Vec<String> {
+        v["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| {
+                format!(
+                    "{}:{}",
+                    w["rule"].as_str().unwrap(),
+                    w["id"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+    let (_, doctor) = api.get("/v1/doctor");
+    assert_eq!(doctor["clean"], true);
+    let found = rules(&doctor);
+    assert!(
+        found.contains(&"blocked-in-progress:B".to_string()),
+        "{found:?}"
+    );
+
+    // The reopened parent is recorded once the rule has actually changed it.
+    assert!(wait_for(|| {
+        api.post("/v1/rescan", "");
+        rules(&api.get("/v1/doctor").1).contains(&"parent-in-progress:P".to_string())
+    }));
+    assert_eq!(api.get("/v1/tickets/P").1["status"], "in-progress");
+    let (_, events) = api.get("/v1/events");
+    let raised: Vec<&str> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "warning.raised")
+        .map(|e| e["data"]["rule"].as_str().unwrap())
+        .collect();
+    assert!(raised.contains(&"blocked-in-progress"));
+    assert!(raised.contains(&"parent-in-progress"));
+
+    // The warning is stored on disk and clears with its condition; the event stays.
+    assert!(dir.path().join(".simpletickets/warnings.json").exists());
+    api.patch("/v1/tickets/A", r#"{"status":"done"}"#);
+    let after = rules(&api.get("/v1/doctor").1);
+    assert!(
+        !after.contains(&"blocked-in-progress:B".to_string()),
+        "{after:?}"
+    );
+    assert!(after.contains(&"parent-in-progress:P".to_string()));
+}

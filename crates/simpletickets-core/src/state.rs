@@ -34,6 +34,10 @@ pub fn known_ids_path(dir: &Path) -> PathBuf {
     state_dir(dir).join("known-ids.json")
 }
 
+pub fn warnings_path(dir: &Path) -> PathBuf {
+    state_dir(dir).join("warnings.json")
+}
+
 pub fn lease_path(dir: &Path) -> PathBuf {
     state_dir(dir).join("daemon.lock")
 }

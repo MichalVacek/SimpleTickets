@@ -234,6 +234,13 @@ impl Shared {
         for change in &report.changes {
             self.events.publish("rule.applied", json!(change));
         }
+        for warning in &report.raised {
+            self.events.publish("warning.raised", json!(warning));
+        }
+        if let Some(message) = &report.state_error {
+            self.events
+                .publish("state.error", json!({"message": message}));
+        }
         let problems =
             store.problems().len() + store.duplicates().len() + store.offline_roots().len();
         let summary = json!({

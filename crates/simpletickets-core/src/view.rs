@@ -3,6 +3,7 @@
 use crate::doctor;
 use crate::frontmatter::Document;
 use crate::store::{IndexedTicket, Store};
+use crate::warnings;
 use serde_json::{json, Value};
 use std::fs;
 
@@ -67,6 +68,7 @@ pub fn doctor_json(store: &Store) -> Value {
         "clean": report.is_clean(),
         "issues": issues,
         "tombstones": tombstones_json(store),
+        "warnings": warnings::load(&store.config().dir),
     })
 }
 

@@ -252,3 +252,23 @@ fn cli_commands_work_while_a_daemon_runs_but_a_second_daemon_is_refused() {
     );
     running.stop();
 }
+
+#[test]
+fn doctor_lists_persisted_warnings_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let a = create_id(d, &["Blocker"]);
+    let b = create_id(d, &["Waiting", "--blocked-by", &a]);
+    ok(d, &["set-status", &b, "in-progress"]);
+    let out = ok(d, &["doctor"]);
+    assert!(
+        out.contains("no problems found") && out.contains("warning [blocked-in-progress]"),
+        "{out}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&ok(d, &["doctor", "--json"])).unwrap();
+    assert_eq!(json["clean"], true);
+    assert_eq!(json["warnings"][0]["id"], b.as_str());
+
+    ok(d, &["set-status", &a, "done"]);
+    assert!(!ok(d, &["doctor"]).contains("warning"));
+}

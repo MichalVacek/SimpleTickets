@@ -327,6 +327,9 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                 println!("{}", doctor_json(&store));
             } else {
                 print!("{report}");
+                for w in simpletickets_core::warnings::load(&ctx.dir) {
+                    println!("{w}");
+                }
             }
             Ok(if report.is_clean() {
                 ExitCode::SUCCESS

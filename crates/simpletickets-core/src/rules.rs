@@ -11,6 +11,7 @@ use crate::config::{Category, FinishedParent, LogLevel};
 use crate::state::is_within;
 use crate::store::Store;
 use crate::time::now_timestamp;
+use crate::warnings::{self, StoredWarning};
 use crate::write::{patch_file, Patch, WriteError, WriteOptions};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -65,6 +66,8 @@ pub struct RunReport {
     /// Changes that could not be applied, with the reason.
     pub skipped: Vec<Skipped>,
     pub warnings: Vec<Warning>,
+    /// Warnings that were not in the persistent record before this run.
+    pub raised: Vec<StoredWarning>,
     /// Set when the state files next to the tickets could not be updated.
     pub state_error: Option<String>,
 }
@@ -247,8 +250,15 @@ pub fn reconcile(
         dry_run: options.dry_run,
         ..RunReport::default()
     };
+    let mut conditions: Vec<Warning> = Vec::new();
     for _ in 0..MAX_PASSES {
         let plan = plan(&store);
+        conditions = plan
+            .warnings
+            .iter()
+            .filter(|w| w.kind == WarningKind::Condition)
+            .cloned()
+            .collect();
         for w in plan.warnings {
             if !report.warnings.contains(&w) {
                 report.warnings.push(w);
@@ -283,6 +293,27 @@ pub fn reconcile(
     }
     if let Err(e) = store.record_known() {
         report.state_error = Some(format!("known IDs: {e}"));
+    }
+    let events: Vec<Warning> = report
+        .warnings
+        .iter()
+        .filter(|w| {
+            w.kind == WarningKind::Event
+                && report
+                    .changes
+                    .iter()
+                    .any(|c| c.id == w.id && c.rule == w.rule)
+        })
+        .cloned()
+        .collect();
+    match warnings::update(
+        &store.config().dir,
+        &conditions,
+        &events,
+        store.frozen_ids(),
+    ) {
+        Ok(raised) => report.raised = raised,
+        Err(e) => report.state_error = Some(format!("warnings: {e}")),
     }
     (store, report)
 }
@@ -635,6 +666,68 @@ mod tests {
         assert!(plan.changes.is_empty());
         assert_eq!(plan.warnings[0].rule, "done-while-blocked");
         assert_eq!(plan.warnings[0].id, "B");
+    }
+
+    #[test]
+    fn warnings_are_persisted_and_clear_with_their_condition() {
+        let (dir, config) = setup(&[
+            ("a.md", &ticket("A", "todo", "")),
+            ("b.md", &ticket("B", "in-progress", "blocked_by: [A]\n")),
+        ]);
+        let (_, report) = reconcile(Store::scan(&config), None, NOW);
+        assert_eq!(report.raised.len(), 1);
+        let stored = warnings::load(dir.path());
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].rule, "blocked-in-progress");
+        let (_, again) = reconcile(Store::scan(&config), None, NOW);
+        assert!(again.raised.is_empty());
+
+        write(dir.path(), "a.md", &ticket("A", "done", ""));
+        reconcile(Store::scan(&config), None, NOW);
+        assert!(warnings::load(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn dry_run_persists_no_warnings() {
+        let (dir, config) = setup(&[
+            ("a.md", &ticket("A", "todo", "")),
+            ("b.md", &ticket("B", "in-progress", "blocked_by: [A]\n")),
+        ]);
+        let options = RunOptions {
+            dry_run: true,
+            ..NOW
+        };
+        let (_, report) = reconcile(Store::scan(&config), None, options);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(warnings::load(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_reopened_parent_stays_on_record_after_the_condition_is_gone() {
+        let (dir, config) = setup(&[
+            ("p.md", &ticket("P", "done", "")),
+            ("c.md", &ticket("C", "in-progress", "parent: P\n")),
+        ]);
+        let (store, report) = reconcile(Store::scan(&config), None, NOW);
+        assert_eq!(status_of(&store, "P"), "in-progress");
+        assert_eq!(report.raised.len(), 1);
+        let stored = warnings::load(dir.path());
+        assert_eq!(stored[0].kind, "event");
+        assert!(stored[0].message.contains("reopening"));
+        let (_, again) = reconcile(store, None, NOW);
+        assert!(again.raised.is_empty());
+        assert_eq!(warnings::load(dir.path()).len(), 1);
+    }
+
+    #[test]
+    fn an_event_whose_change_was_skipped_is_not_recorded() {
+        let (dir, config) = setup(&[
+            ("p.md", &ticket("P", "done", "")),
+            ("c.md", &ticket("C", "in-progress", "parent: P\n")),
+        ]);
+        let (_, report) = reconcile(Store::scan(&config), None, RunOptions::default());
+        assert_eq!(report.skipped.len(), 1);
+        assert!(warnings::load(dir.path()).is_empty());
     }
 
     #[test]
