@@ -2,7 +2,7 @@
 
 A lightweight, local-first ticketing app. Tickets are plain Markdown files in a folder tree, much like an Obsidian vault. A small background daemon keeps them consistent and exposes a local API. Everything beyond ticket management is a plugin.
 
-Status: early development. The command line, daemon and local API work.
+Status: early development. The command line, daemon, local API, update check and MCP plugin work.
 
 ## Goals
 
@@ -69,6 +69,28 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 | `GET /v1/events?since=N&wait=S` | event stream by long polling: events after sequence `N`, waiting up to `S` seconds |
 | `GET /v1/audit?limit=N` | automatic changes |
 | `GET /v1/templates` | template names |
+
+## MCP plugin
+
+`plugins/mcp` builds `simpletickets-mcp`, a separate process that speaks MCP over stdio (newline-delimited JSON-RPC) and forwards tool calls to the running daemon. It has no dependency on the daemon's code at runtime, only on the local API and its token.
+
+```
+cargo build --release -p simpletickets-mcp
+simpletickets-mcp --dir ~/tickets            # reads ~/tickets/.simpletickets/token
+simpletickets-mcp --url http://127.0.0.1:7878 --token-file /path/to/token
+```
+
+Settings come from flags or `SIMPLETICKETS_URL`, `SIMPLETICKETS_TOKEN`, `SIMPLETICKETS_DIR`. Register it in an MCP client as a stdio server whose command is `simpletickets-mcp` with those arguments. Start the daemon first.
+
+| Tool | Purpose |
+|---|---|
+| `list_tickets` | filters: `status`, `category`, `priority`, `tag`, `parent`, `title`, `blocked`, `due_by`, `fields`, `limit` |
+| `show_ticket` | one ticket with body and derived data |
+| `create_ticket` | `title` plus any of the other ticket fields, `body`, `template`, `role` (`parent` or `sub`) |
+| `update_ticket` | `id` plus the fields to change; `null` clears `priority`, `due`, `parent` |
+| `next_ticket` | the first unblocked todo ticket matching the optional filters, ordered by `order` (default `due`, `priority`; `id` is also accepted). Tickets without a due date sort last; priorities rank critical, high, medium, low, then `P0`-style numbers, then the rest |
+
+API errors come back as tool errors, so a client sees the daemon's message (for example an unknown status).
 
 ## Update check
 

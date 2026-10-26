@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/simpletickets-core", "crates/simpletickets"]
+members = ["crates/simpletickets-core", "crates/simpletickets", "plugins/mcp"]
 
 [workspace.package]
 version = "0.1.0"
