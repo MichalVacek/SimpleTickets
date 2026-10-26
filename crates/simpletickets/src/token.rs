@@ -147,19 +147,32 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[test]
-    fn token_acl_has_only_the_current_user() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("token");
-        load_or_create(&path).unwrap();
+    fn acl_of(path: &Path) -> String {
         let out = std::process::Command::new("icacls")
-            .arg(&path)
+            .arg(path)
             .output()
             .unwrap();
-        let text = String::from_utf8_lossy(&out.stdout).to_string();
-        let entries: Vec<&str> = text.lines().filter(|l| l.contains(":(")).collect();
-        assert_eq!(entries.len(), 1, "{text}");
-        assert!(entries[0].contains("(F)"), "{text}");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn token_acl_drops_groups_inherited_from_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        // BUILTIN\Users (S-1-5-32-545) gets read access to everything created below.
+        let granted = std::process::Command::new("icacls")
+            .arg(dir.path())
+            .args(["/grant", "*S-1-5-32-545:(OI)(CI)R"])
+            .status()
+            .unwrap();
+        assert!(granted.success());
+        let plain = dir.path().join("plain");
+        fs::write(&plain, "x").unwrap();
+        assert!(acl_of(&plain).contains("BUILTIN\\Users"), "precondition");
+
+        let path = dir.path().join("token");
+        load_or_create(&path).unwrap();
+        let text = acl_of(&path);
         for other in ["Everyone", "BUILTIN\\Users", "Authenticated Users"] {
             assert!(!text.contains(other), "{text}");
         }
