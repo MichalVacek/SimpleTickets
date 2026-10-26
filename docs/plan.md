@@ -69,7 +69,7 @@ plugins/
 - Depends on: 8. Size: ~400 lines.
 
 ### 12. Distribution
-- Installer script for macOS (launchd) that asks which addons to include, Dockerfile with polling fallback for bind mounts.
+- Installer script for macOS (launchd) and Linux (systemd user unit) that asks which addons to include, PowerShell installer with a logon scheduled task, Dockerfile with polling fallback for bind mounts and a TCP health check, release workflow for five targets.
 - Depends on: 8, 11. Size: ~300 lines.
 
 ## Open questions
@@ -77,8 +77,8 @@ plugins/
 - Event-driven rules versus rules after each periodic scan (slice 6 runs reconcilers after every scan; revisit if too costly).
 - Event stream contract and API versioning (slice 8 starts at `/v1`).
 - Plugin discovery and supervision (the MCP plugin is started by its client; supervision comes later).
-- Linux and Windows packaging after the macOS installer.
-- Release archives: the installer's download mode expects `simpletickets-<arch>-apple-darwin.tar.gz` assets, but no release workflow publishes them yet.
+- Windows as a real service, signed releases, musl builds.
+- Release archives: `release.yml` publishes the assets the installers expect; it has not run yet (no tag pushed). Windows and Linux installs are untested on real machines.
 - The Docker image listens on all interfaces inside the container (`--bind-all`); revisit if a safer way to reach the API from the host is wanted.
 
 ## Testing checklist

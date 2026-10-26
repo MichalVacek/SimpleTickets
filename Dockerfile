@@ -16,5 +16,9 @@ VOLUME /data
 EXPOSE 7878
 # Bind mounts often deliver no file events, so the container polls; it listens on all
 # interfaces inside the container, and the port is published to the host's loopback only.
+# The API requires a token on every route, health included, so the check only confirms
+# that the daemon accepts TCP connections (bash is part of the base image; curl is not).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/7878"]
 ENTRYPOINT ["simpletickets", "--dir", "/data"]
 CMD ["daemon", "--bind-all", "--poll", "--port", "7878"]

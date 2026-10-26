@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Installs SimpleTickets on macOS: binaries into a prefix, optional addons, and a
-# launchd job that keeps the daemon running.
+# Installs SimpleTickets on macOS or Linux: binaries into a prefix, optional addons,
+# and a per-user service that keeps the daemon running (launchd on macOS, a systemd
+# user unit on Linux).
 set -euo pipefail
 
 REPO="MichalVacek/SimpleTickets"
 LABEL="com.simpletickets.daemon"
+UNIT="simpletickets.service"
 
 # Addons: name|crate|binary|description. Add a line to offer another addon; the
 # crate is built from source or its binary is taken from the release archive.
@@ -23,9 +25,12 @@ Usage: scripts/install.sh [options]
   --from-source          build with cargo from this checkout
   --from-release         download the latest release archive
                          (default: from source when run inside a checkout with cargo)
-  --launchagents-dir DIR where to write the plist (default: ~/Library/LaunchAgents)
-  --no-service           do not write a launchd plist
-  --no-load              write the plist but do not load it
+  --launchagents-dir DIR macOS: where to write the plist (default: ~/Library/LaunchAgents)
+  --systemd-dir DIR      Linux: where to write the unit
+                         (default: ${XDG_CONFIG_HOME:-~/.config}/systemd/user)
+  --no-service           do not write a service definition
+  --no-load              write the service definition but do not load or start it
+  --os macos|linux       preview another OS's plan (only together with --dry-run)
   --yes                  accept defaults without asking
   --dry-run              print what would happen, change nothing
   -h, --help             show this help
@@ -50,6 +55,8 @@ PORT=7878
 ADDON_LIST=""
 MODE="auto"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
+SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+OS=""
 SERVICE=1
 LOAD=1
 ASSUME_YES=0
@@ -64,6 +71,8 @@ while [ $# -gt 0 ]; do
     --from-source) MODE="source"; shift ;;
     --from-release) MODE="release"; shift ;;
     --launchagents-dir) AGENTS_DIR="${2:?--launchagents-dir needs a value}"; shift 2 ;;
+    --systemd-dir) SYSTEMD_DIR="${2:?--systemd-dir needs a value}"; shift 2 ;;
+    --os) OS="${2:?--os needs a value}"; shift 2 ;;
     --no-service) SERVICE=0; shift ;;
     --no-load) LOAD=0; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
@@ -77,8 +86,20 @@ case "$PORT" in
   ''|*[!0-9]*) die "--port must be a number" ;;
 esac
 
-if [ "$DRY_RUN" -eq 0 ] && [ "$(uname -s)" != "Darwin" ]; then
-  die "this installer supports macOS only (use --dry-run to preview)"
+case "$(uname -s)" in
+  Darwin) HOST_OS="macos" ;;
+  Linux) HOST_OS="linux" ;;
+  *) HOST_OS="" ;;
+esac
+if [ -n "$OS" ]; then
+  [ "$DRY_RUN" -eq 1 ] || die "--os is only for previews and needs --dry-run"
+  case "$OS" in
+    macos|linux) ;;
+    *) die "--os must be macos or linux" ;;
+  esac
+else
+  OS="$HOST_OS"
+  [ -n "$OS" ] || die "unsupported system $(uname -s); use macOS or Linux (Windows: scripts/install.ps1)"
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -86,9 +107,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN_DIR="$PREFIX/bin"
 PLIST="$AGENTS_DIR/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/SimpleTickets"
+UNIT_FILE="$SYSTEMD_DIR/$UNIT"
 
 if [ "$MODE" = "auto" ]; then
-  if [ -f "$REPO_ROOT/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+  if [ -f "$REPO_ROOT/Cargo.toml" ] && command -v cargo >/dev/null 2>&1 && [ "$OS" = "$HOST_OS" ]; then
     MODE="source"
   else
     MODE="release"
@@ -190,6 +212,54 @@ plist_text() {
 PLIST
 }
 
+# Quotes one systemd ExecStart word: backslash, double quote, % and $ are special.
+systemd_quote() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//%/%%}"
+  s="${s//\$/\$\$}"
+  printf '"%s"' "$s"
+}
+
+unit_text() {
+  cat <<UNITFILE
+[Unit]
+Description=SimpleTickets daemon
+
+[Service]
+ExecStart=$(systemd_quote "$BIN_DIR/simpletickets") --dir $(systemd_quote "$TICKETS_DIR") daemon --port $PORT
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+UNITFILE
+}
+
+# Prints the release asset name for this OS and CPU.
+release_asset() {
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64|aarch64) arch="aarch64" ;;
+    x86_64|amd64) arch="x86_64" ;;
+    *) die "no release archive for CPU $arch" ;;
+  esac
+  case "$OS" in
+    macos) echo "simpletickets-$arch-apple-darwin.tar.gz" ;;
+    linux) echo "simpletickets-$arch-unknown-linux-gnu.tar.gz" ;;
+  esac
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
 obtain_binaries() {
   # $@: binary names to install; core binary first.
   local names=("$@")
@@ -205,18 +275,22 @@ obtain_binaries() {
       run install -m 0755 "$REPO_ROOT/target/release/$name" "$BIN_DIR/$name"
     done
   else
-    local arch asset tmp
-    arch="$(uname -m)"
-    [ "$arch" = "arm64" ] && arch="aarch64"
-    asset="simpletickets-$arch-apple-darwin.tar.gz"
-    local url="https://github.com/$REPO/releases/latest/download/$asset"
+    local asset tmp base
+    asset="$(release_asset)"
+    base="https://github.com/$REPO/releases/latest/download"
     if [ "$DRY_RUN" -eq 1 ]; then
-      echo "would download $url and install: ${names[*]}"
+      echo "would download $base/$asset, verify it against $base/SHA256SUMS and install: ${names[*]}"
       return
     fi
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    curl -fsSL "$url" -o "$tmp/$asset" || die "cannot download $url (no release published yet? try --from-source)"
+    curl -fsSL "$base/$asset" -o "$tmp/$asset" || die "cannot download $base/$asset (no release published yet? try --from-source)"
+    curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "cannot download $base/SHA256SUMS"
+    local expected actual
+    expected="$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1 }' "$tmp/SHA256SUMS")"
+    [ -n "$expected" ] || die "$asset is not listed in SHA256SUMS"
+    actual="$(sha256_of "$tmp/$asset")"
+    [ "$expected" = "$actual" ] || die "checksum mismatch for $asset"
     tar -xzf "$tmp/$asset" -C "$tmp"
     local name
     for name in "${names[@]}"; do
@@ -236,28 +310,65 @@ done
 echo "Install mode: $MODE"
 echo "Binaries:     $BIN_DIR (${NAMES[*]})"
 echo "Tickets:      $TICKETS_DIR"
-[ "$SERVICE" -eq 1 ] && echo "Service:      $PLIST (port $PORT)"
+if [ "$SERVICE" -eq 1 ]; then
+  if [ "$OS" = "macos" ]; then
+    echo "Service:      $PLIST (port $PORT)"
+  else
+    echo "Service:      $UNIT_FILE (port $PORT)"
+  fi
+fi
 
 run mkdir -p "$BIN_DIR" "$TICKETS_DIR"
 obtain_binaries "${NAMES[@]}"
 
-if [ "$SERVICE" -eq 1 ]; then
+install_launchd() {
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "would write $PLIST:"
     plist_text
+    return
+  fi
+  mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+  plist_text >"$PLIST"
+  command -v plutil >/dev/null 2>&1 && plutil -lint "$PLIST" >/dev/null
+  echo "wrote $PLIST"
+  if [ "$LOAD" -eq 1 ] && ask "Start the daemon now and at every login?" y; then
+    local domain
+    domain="gui/$(id -u)"
+    launchctl bootout "$domain/$LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "$domain" "$PLIST"
+    echo "daemon loaded as $LABEL"
   else
-    mkdir -p "$AGENTS_DIR" "$LOG_DIR"
-    plist_text >"$PLIST"
-    command -v plutil >/dev/null 2>&1 && plutil -lint "$PLIST" >/dev/null
-    echo "wrote $PLIST"
-    if [ "$LOAD" -eq 1 ] && ask "Start the daemon now and at every login?" y; then
-      domain="gui/$(id -u)"
-      launchctl bootout "$domain/$LABEL" >/dev/null 2>&1 || true
-      launchctl bootstrap "$domain" "$PLIST"
-      echo "daemon loaded as $LABEL"
-    else
-      echo "not loaded; start it with: launchctl bootstrap gui/$(id -u) $PLIST"
-    fi
+    echo "not loaded; start it with: launchctl bootstrap gui/$(id -u) $PLIST"
+  fi
+}
+
+install_systemd() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "would write $UNIT_FILE:"
+    unit_text
+    echo "would run: systemctl --user daemon-reload"
+    echo "would run: systemctl --user enable --now $UNIT"
+    return
+  fi
+  command -v systemctl >/dev/null 2>&1 || die "systemctl not found; use --no-service and run the daemon yourself"
+  mkdir -p "$SYSTEMD_DIR"
+  unit_text >"$UNIT_FILE"
+  echo "wrote $UNIT_FILE"
+  if [ "$LOAD" -eq 1 ] && ask "Start the daemon now and at every login?" y; then
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$UNIT"
+    echo "daemon started as $UNIT"
+    echo "note: to keep it running while logged out, run: loginctl enable-linger $(id -un)"
+  else
+    echo "not started; start it with: systemctl --user enable --now $UNIT"
+  fi
+}
+
+if [ "$SERVICE" -eq 1 ]; then
+  if [ "$OS" = "macos" ]; then
+    install_launchd
+  else
+    install_systemd
   fi
 fi
 
