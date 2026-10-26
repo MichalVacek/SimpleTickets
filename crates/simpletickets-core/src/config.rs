@@ -71,6 +71,21 @@ pub enum LogLevel {
     Warn,
 }
 
+/// What happens when a sub-ticket starts under a done or cancelled parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FinishedParent {
+    /// The rules reopen the parent as in progress and record a warning.
+    #[default]
+    Reopen,
+    /// Creating, moving or starting such a sub-ticket through the CLI or API is
+    /// refused; for files edited by hand the rules only warn.
+    Refuse,
+}
+
+/// Status given to a parent whose sub-tickets are all done, when enabled.
+pub const DEFAULT_REVIEW_STATUS: &str = "ready-for-review";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// The tickets folder: holds this config and the `.simpletickets` state folder.
@@ -89,6 +104,12 @@ pub struct Config {
     pub tag_logging: BTreeMap<String, LogLevel>,
     /// Whether a cancelled blocker stops blocking.
     pub cancelled_unblocks: bool,
+    /// Whether a parent whose sub-tickets are all done goes to the review status
+    /// instead of counting as done.
+    pub ready_for_review: bool,
+    /// The review status (lower case); always an in-progress status.
+    review_status: String,
+    pub finished_parent: FinishedParent,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -115,6 +136,9 @@ struct RawConfig {
     #[serde(default)]
     tag_logging: BTreeMap<String, LogLevel>,
     cancelled_unblocks: Option<bool>,
+    ready_for_review: Option<bool>,
+    review_status: Option<String>,
+    subticket_under_finished_parent: Option<FinishedParent>,
 }
 
 #[derive(Deserialize)]
@@ -141,6 +165,9 @@ impl Config {
             statuses: default_statuses(),
             tag_logging: BTreeMap::new(),
             cancelled_unblocks: true,
+            ready_for_review: false,
+            review_status: DEFAULT_REVIEW_STATUS.into(),
+            finished_parent: FinishedParent::default(),
         }
     }
 
@@ -217,6 +244,30 @@ impl Config {
             }
         }
 
+        let review_given = raw.review_status.is_some();
+        let review_status = raw.review_status.map_or_else(
+            || DEFAULT_REVIEW_STATUS.to_string(),
+            |s| s.trim().to_lowercase(),
+        );
+        let enabled = raw.ready_for_review.unwrap_or(false);
+        if enabled || review_given {
+            match statuses.get(&review_status) {
+                Some(Category::InProgress) => {}
+                Some(other) => {
+                    return invalid(format!(
+                        "review_status `{review_status}` is mapped to `{other}`; it must be an \
+                         in-progress status"
+                    ))
+                }
+                None => {
+                    return invalid(format!(
+                        "review_status `{review_status}` is not a configured status; add it \
+                         under `in-progress` in `statuses`"
+                    ))
+                }
+            }
+        }
+
         Ok(Config {
             dir: dir.to_path_buf(),
             id_prefix,
@@ -227,7 +278,15 @@ impl Config {
             statuses,
             tag_logging: raw.tag_logging,
             cancelled_unblocks: raw.cancelled_unblocks.unwrap_or(true),
+            ready_for_review: enabled,
+            review_status,
+            finished_parent: raw.subticket_under_finished_parent.unwrap_or_default(),
         })
+    }
+
+    /// The review status, when `ready_for_review` is enabled.
+    pub fn review_status(&self) -> Option<&str> {
+        self.ready_for_review.then_some(self.review_status.as_str())
     }
 
     /// The category of a status name, compared case-insensitively.
@@ -274,6 +333,12 @@ impl Config {
             "statuses": statuses,
             "tag_logging": tag_logging,
             "cancelled_unblocks": self.cancelled_unblocks,
+            "ready_for_review": self.ready_for_review,
+            "review_status": self.review_status,
+            "subticket_under_finished_parent": match self.finished_parent {
+                FinishedParent::Reopen => "reopen",
+                FinishedParent::Refuse => "refuse",
+            },
         })
     }
 
@@ -427,6 +492,61 @@ cancelled_unblocks: false\n",
             invalid_msg("statuses:\n  todo: [a]\n  in-progress: [b]\n  done: [c]")
                 .contains("`cancelled` has no statuses")
         );
+    }
+
+    const REVIEW_STATUSES: &str = "statuses:\n  todo: [todo]\n  in-progress: [in-progress, ready-for-review, Checking]\n  done: [done]\n  cancelled: [cancelled]\n";
+
+    #[test]
+    fn lifecycle_options_default_to_off_and_reopen() {
+        let c = parse("{}").unwrap();
+        assert!(!c.ready_for_review);
+        assert_eq!(c.review_status(), None);
+        assert_eq!(c.finished_parent, FinishedParent::Reopen);
+        let json = c.to_json();
+        assert_eq!(json["ready_for_review"], false);
+        assert_eq!(json["subticket_under_finished_parent"], "reopen");
+    }
+
+    #[test]
+    fn review_status_is_validated() {
+        let on = format!("{REVIEW_STATUSES}ready_for_review: true\n");
+        let c = parse(&on).unwrap();
+        assert_eq!(c.review_status(), Some("ready-for-review"));
+        let custom = format!("{on}review_status: Checking\n");
+        assert_eq!(parse(&custom).unwrap().review_status(), Some("checking"));
+
+        // Enabled with the default name, which the default statuses lack.
+        assert!(invalid_msg("ready_for_review: true").contains("not a configured status"));
+        let wrong = "statuses:\n  todo: [todo, ready-for-review]\n  in-progress: [doing]\n  done: [done]\n  cancelled: [x]\nready_for_review: true\n";
+        assert!(invalid_msg(wrong).contains("must be an in-progress status"));
+        // A configured name is checked even while the option is off.
+        assert!(
+            invalid_msg(&format!("{REVIEW_STATUSES}review_status: nope\n"))
+                .contains("not a configured status")
+        );
+        let off = format!("{REVIEW_STATUSES}ready_for_review: false\n");
+        assert_eq!(parse(&off).unwrap().review_status(), None);
+        assert!(matches!(
+            parse("ready_for_review: maybe"),
+            Err(ConfigError::Syntax(_))
+        ));
+    }
+
+    #[test]
+    fn finished_parent_policy_is_parsed() {
+        let c = parse("subticket_under_finished_parent: refuse").unwrap();
+        assert_eq!(c.finished_parent, FinishedParent::Refuse);
+        assert_eq!(c.to_json()["subticket_under_finished_parent"], "refuse");
+        assert_eq!(
+            parse("subticket_under_finished_parent: reopen")
+                .unwrap()
+                .finished_parent,
+            FinishedParent::Reopen
+        );
+        assert!(matches!(
+            parse("subticket_under_finished_parent: ignore"),
+            Err(ConfigError::Syntax(_))
+        ));
     }
 
     #[test]

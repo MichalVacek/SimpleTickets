@@ -696,3 +696,42 @@ fn heartbeat_keeps_the_lease_and_loss_switches_rules_off() {
     std::fs::remove_file(&lock).unwrap();
     assert!(wait_for(|| api.get("/v1/health").1["rules_enabled"] == true));
 }
+
+#[test]
+fn review_status_and_finished_parent_policy_through_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        "simpletickets.yml",
+        "statuses:\n  todo: [todo]\n  in-progress: [in-progress, ready-for-review]\n  done: [done]\n  cancelled: [cancelled]\nready_for_review: true\nsubticket_under_finished_parent: refuse\n",
+    );
+    let api = start(dir.path(), false, SLOW);
+    assert_eq!(api.get("/v1/config").1["config"]["ready_for_review"], true);
+    api.post("/v1/tickets", r#"{"title":"Spec"}"#);
+    api.post("/v1/tickets", r#"{"title":"Part one","parent":"ST-1"}"#);
+    api.post("/v1/tickets", r#"{"title":"Part two","parent":"ST-1"}"#);
+
+    api.patch("/v1/tickets/ST-2", r#"{"status":"done"}"#);
+    api.patch("/v1/tickets/ST-3", r#"{"status":"done"}"#);
+    // The parent file is too fresh for the first attempt; a retry follows shortly.
+    assert!(wait_for(
+        || api.get("/v1/tickets/ST-1").1["status"] == "ready-for-review"
+    ));
+    let (_, parent) = api.get("/v1/tickets/ST-1");
+    assert_eq!(parent["ready_for_review"], true);
+    assert_eq!(parent["effective_category"], "in-progress");
+    assert_eq!(api.get("/v1/audit").1[0]["to"], "ready-for-review");
+
+    // Approving the review marks the parent done; then new work under it is refused.
+    assert_eq!(api.patch("/v1/tickets/ST-1", r#"{"status":"done"}"#).0, 200);
+    assert_eq!(api.get("/v1/tickets/ST-1").1["ready_for_review"], false);
+    let (status, body) = api.patch("/v1/tickets/ST-2", r#"{"status":"in-progress"}"#);
+    assert_eq!(status, 409, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("reopen it first"));
+    assert_eq!(
+        api.post("/v1/tickets", r#"{"title":"Late","parent":"ST-1"}"#)
+            .0,
+        409
+    );
+    assert_eq!(api.get("/v1/tickets/ST-1").1["status"], "done");
+}

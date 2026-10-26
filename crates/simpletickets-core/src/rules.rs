@@ -7,7 +7,7 @@
 //! and picked up by the next run.
 
 use crate::audit::{AuditEntry, AuditLog};
-use crate::config::{Category, LogLevel};
+use crate::config::{Category, FinishedParent, LogLevel};
 use crate::state::is_within;
 use crate::store::Store;
 use crate::time::now_timestamp;
@@ -31,12 +31,24 @@ pub struct Change {
     pub level: &'static str,
 }
 
-/// A condition worth reporting that no rule changes automatically.
+/// Whether a warning describes a state that can clear by itself or a one-off event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WarningKind {
+    /// A state of the tickets; it is dropped once the state no longer holds.
+    Condition,
+    /// Something the rules just did, such as reopening a parent.
+    Event,
+}
+
+/// A condition worth reporting that no rule changes automatically, or a
+/// notable automatic change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Warning {
     pub rule: &'static str,
     pub id: String,
     pub message: String,
+    pub kind: WarningKind,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -71,15 +83,25 @@ pub struct RunOptions {
     pub write: WriteOptions,
 }
 
-/// Computes the changes the rules want, without touching any file.
+/// Computes the changes the rules want, without touching any file. Frozen
+/// tickets (of an offline root), and parents with a frozen sub-ticket, are skipped.
 ///
 /// Rule `parent-in-progress`: a parent whose sub-tickets have started is set
 /// to the first configured in-progress status, also when it was done or
-/// cancelled (reported as a warning). Parents inside the configured parent
-/// folder are specification files; their state is derived and never written,
-/// so they only produce warnings.
+/// cancelled (reported as a warning). With `subticket_under_finished_parent:
+/// refuse` a finished parent is left alone and only reported.
 ///
-/// Warning `blocked-in-progress`: a ticket is in progress while a blocker is open.
+/// Rule `parent-ready-for-review`: with `ready_for_review` enabled, a parent
+/// whose sub-tickets are all finished (at least one done) is set to the review
+/// status instead of counting as done.
+///
+/// Parents inside the configured parent folder are specification files; their
+/// state is derived and never written, so they only produce warnings.
+///
+/// Warnings: `blocked-in-progress` (in progress while a blocker is open),
+/// `done-while-blocked` (done although a blocker is open, for example after the
+/// blocker was reopened) and `review-stale` (in the review status while
+/// sub-tickets are open).
 pub fn plan(store: &Store) -> Plan {
     let config = store.config();
     let mut plan = Plan::default();
@@ -87,6 +109,7 @@ pub fn plan(store: &Store) -> Plan {
         .statuses_in(Category::InProgress)
         .first()
         .map(|s| (*s).to_string());
+    let review = config.review_status().map(str::to_string);
 
     for entry in store.tickets() {
         let id = &entry.ticket.id;
@@ -95,46 +118,99 @@ pub fn plan(store: &Store) -> Plan {
         }
         let own = store.own_category(id);
 
-        if own == Some(Category::InProgress) {
-            let blockers = store.open_blockers(id);
-            if !blockers.is_empty() {
-                plan.warnings.push(Warning {
+        let blockers = store.open_blockers(id);
+        if !blockers.is_empty() {
+            match own {
+                Some(Category::InProgress) => plan.warnings.push(Warning {
                     rule: "blocked-in-progress",
                     id: id.clone(),
                     message: format!("in progress while blocked by {}", blockers.join(", ")),
-                });
+                    kind: WarningKind::Condition,
+                }),
+                Some(Category::Done) => plan.warnings.push(Warning {
+                    rule: "done-while-blocked",
+                    id: id.clone(),
+                    message: format!("done while blocked by {}", blockers.join(", ")),
+                    kind: WarningKind::Condition,
+                }),
+                _ => {}
             }
         }
 
-        if store.children_of(id).is_empty()
-            || store.effective_category(id) != Some(Category::InProgress)
-            || store.children_of(id).iter().any(|c| store.is_frozen(c))
-        {
+        let kids = store.children_of(id);
+        if kids.is_empty() || kids.iter().any(|c| store.is_frozen(c)) {
+            continue;
+        }
+        let ready = store.is_ready_for_review(id);
+        let in_review = review
+            .as_deref()
+            .is_some_and(|r| entry.ticket.status.trim().eq_ignore_ascii_case(r));
+        if in_review && !ready {
+            plan.warnings.push(Warning {
+                rule: "review-stale",
+                id: id.clone(),
+                message: format!(
+                    "{} but its sub-tickets are not all finished",
+                    entry.ticket.status
+                ),
+                kind: WarningKind::Condition,
+            });
+        }
+        if store.effective_category(id) != Some(Category::InProgress) {
             continue;
         }
         let finished = matches!(own, Some(Category::Done | Category::Cancelled));
-        if !matches!(own, Some(Category::Todo)) && !finished {
+        let wants_write = match own {
+            Some(Category::Todo) => true,
+            Some(Category::InProgress) => ready && !in_review,
+            _ => finished,
+        };
+        if !wants_write {
             continue;
         }
         let derived_only = config
             .parent_folder
             .as_ref()
             .is_some_and(|f| is_within(&entry.path, f));
+        let refuse = finished && config.finished_parent == FinishedParent::Refuse;
         if finished {
+            let (rule, note, kind) = if refuse {
+                (
+                    "subticket-under-finished-parent",
+                    "; not reopening it",
+                    WarningKind::Condition,
+                )
+            } else if derived_only {
+                ("parent-in-progress", "", WarningKind::Condition)
+            } else {
+                ("parent-in-progress", "; reopening it", WarningKind::Event)
+            };
+            let what = if ready {
+                "has all sub-tickets finished"
+            } else {
+                "has a sub-ticket in progress"
+            };
             plan.warnings.push(Warning {
-                rule: "parent-in-progress",
+                rule,
                 id: id.clone(),
-                message: format!(
-                    "{} parent has a sub-ticket in progress{}",
-                    entry.ticket.status,
-                    if derived_only { "" } else { "; reopening it" }
-                ),
+                message: format!("{} parent {what}{note}", entry.ticket.status),
+                kind,
             });
         }
-        if derived_only {
+        if derived_only || refuse {
             continue;
         }
-        let Some(target) = &in_progress else { continue };
+        let (rule, target, reason) = match (&review, ready) {
+            (Some(review), true) => (
+                "parent-ready-for-review",
+                review,
+                "all sub-tickets are finished",
+            ),
+            _ => match &in_progress {
+                Some(t) => ("parent-in-progress", t, "a sub-ticket is in progress"),
+                None => continue,
+            },
+        };
         let level = if entry
             .ticket
             .tags
@@ -146,13 +222,13 @@ pub fn plan(store: &Store) -> Plan {
             "info"
         };
         plan.changes.push(Change {
-            rule: "parent-in-progress",
+            rule,
             id: id.clone(),
             path: entry.path.clone(),
             expected_hash: entry.hash.clone(),
             from: entry.ticket.status.clone(),
             to: target.clone(),
-            reason: "a sub-ticket is in progress".into(),
+            reason: reason.into(),
             level,
         });
     }
@@ -432,6 +508,133 @@ mod tests {
         let plan = plan(&Store::scan(&config));
         assert!(plan.changes.is_empty());
         assert_eq!(plan.warnings[0].rule, "blocked-in-progress");
+    }
+
+    const REVIEW: &str = "statuses:\n  todo: [todo]\n  in-progress: [in-progress, ready-for-review]\n  done: [done]\n  cancelled: [cancelled]\nready_for_review: true\n";
+
+    fn review_setup(parent_status: &str, kids: &[&str]) -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "p.md", &ticket("P", parent_status, ""));
+        for (i, status) in kids.iter().enumerate() {
+            write(
+                dir.path(),
+                &format!("c{i}.md"),
+                &ticket(&format!("C{i}"), status, "parent: P\n"),
+            );
+        }
+        let config = Config::parse(REVIEW, dir.path()).unwrap();
+        (dir, config)
+    }
+
+    #[test]
+    fn finished_subtickets_move_the_parent_to_review_not_done() {
+        let (dir, config) = review_setup("in-progress", &["done", "cancelled"]);
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        let (store, report) = reconcile(Store::scan(&config), Some(&log), NOW);
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.changes[0].rule, "parent-ready-for-review");
+        assert_eq!(status_of(&store, "P"), "ready-for-review");
+        assert_eq!(log.tail(1)[0]["to"], "ready-for-review");
+        let (_, again) = reconcile(store, Some(&log), NOW);
+        assert!(again.changes.is_empty());
+    }
+
+    #[test]
+    fn todo_parent_goes_straight_to_review_when_all_children_are_done() {
+        let (_dir, config) = review_setup("todo", &["done", "done"]);
+        let (store, report) = reconcile(Store::scan(&config), None, NOW);
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(status_of(&store, "P"), "ready-for-review");
+    }
+
+    #[test]
+    fn parent_done_by_a_human_stays_done_and_open_children_keep_it_in_progress() {
+        let (_dir, config) = review_setup("done", &["done", "done"]);
+        let (store, report) = reconcile(Store::scan(&config), None, NOW);
+        assert!(report.changes.is_empty());
+        assert_eq!(status_of(&store, "P"), "done");
+
+        let (_dir, config) = review_setup("todo", &["done", "todo"]);
+        let (store, report) = reconcile(Store::scan(&config), None, NOW);
+        assert_eq!(report.changes[0].rule, "parent-in-progress");
+        assert_eq!(status_of(&store, "P"), "in-progress");
+    }
+
+    #[test]
+    fn review_status_is_not_applied_to_spec_folder_parents_and_stale_review_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "specs/p.md", &ticket("P", "todo", ""));
+        write(dir.path(), "work/c.md", &ticket("C", "done", "parent: P\n"));
+        let text = format!("{REVIEW}parent_folder: specs\n");
+        let config = Config::parse(&text, dir.path()).unwrap();
+        let (store, report) = reconcile(Store::scan(&config), None, NOW);
+        assert!(report.changes.is_empty());
+        assert_eq!(status_of(&store, "P"), "todo");
+        assert!(store.is_ready_for_review("P"));
+
+        let (_dir, config) = review_setup("ready-for-review", &["done", "todo"]);
+        let plan = plan(&Store::scan(&config));
+        assert!(plan.changes.is_empty());
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|w| w.rule == "review-stale" && w.id == "P"));
+    }
+
+    #[test]
+    fn refuse_mode_never_reopens_a_finished_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "p.md", &ticket("P", "done", ""));
+        write(
+            dir.path(),
+            "c.md",
+            &ticket("C", "in-progress", "parent: P\n"),
+        );
+        let config =
+            Config::parse("subticket_under_finished_parent: refuse\n", dir.path()).unwrap();
+        let (store, report) = reconcile(Store::scan(&config), None, NOW);
+        assert!(report.changes.is_empty());
+        assert_eq!(status_of(&store, "P"), "done");
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.rule == "subticket-under-finished-parent")
+            .unwrap();
+        assert_eq!(w.kind, WarningKind::Condition);
+        assert!(w.message.contains("not reopening"));
+    }
+
+    #[test]
+    fn reopening_a_parent_is_an_event_and_derived_parents_a_condition() {
+        let (_dir, config) = setup(&[
+            ("p.md", &ticket("P", "done", "")),
+            ("c.md", &ticket("C", "in-progress", "parent: P\n")),
+        ]);
+        let first = plan(&Store::scan(&config));
+        assert_eq!(first.warnings[0].kind, WarningKind::Event);
+
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "specs/p.md", &ticket("P", "done", ""));
+        write(
+            dir.path(),
+            "c.md",
+            &ticket("C", "in-progress", "parent: P\n"),
+        );
+        let config = Config::parse("parent_folder: specs\n", dir.path()).unwrap();
+        let second = plan(&Store::scan(&config));
+        assert_eq!(second.warnings[0].kind, WarningKind::Condition);
+    }
+
+    #[test]
+    fn warns_when_a_done_ticket_has_an_open_blocker() {
+        let (_dir, config) = setup(&[
+            ("a.md", &ticket("A", "in-progress", "")),
+            ("b.md", &ticket("B", "done", "blocked_by: [A]\n")),
+        ]);
+        let plan = plan(&Store::scan(&config));
+        assert!(plan.changes.is_empty());
+        assert_eq!(plan.warnings[0].rule, "done-while-blocked");
+        assert_eq!(plan.warnings[0].id, "B");
     }
 
     #[test]

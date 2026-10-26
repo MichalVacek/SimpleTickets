@@ -1,6 +1,6 @@
 //! Creating and updating tickets with validation, shared by the CLI and the API.
 
-use crate::config::Category;
+use crate::config::{Category, FinishedParent};
 use crate::id::next_id;
 use crate::state::is_within;
 use crate::store::Store;
@@ -191,6 +191,31 @@ fn check_links(
     Ok(())
 }
 
+/// With `subticket_under_finished_parent: refuse`, work may not be added to or
+/// started under a parent that is done or cancelled.
+fn check_parent_open(
+    store: &Store,
+    parent: Option<&str>,
+    sub: Option<Category>,
+) -> Result<(), OpError> {
+    if store.config().finished_parent != FinishedParent::Refuse {
+        return Ok(());
+    }
+    let Some(parent) = parent else { return Ok(()) };
+    let finished = matches!(
+        store.own_category(parent),
+        Some(Category::Done | Category::Cancelled)
+    );
+    if finished && matches!(sub, Some(Category::Todo | Category::InProgress)) {
+        let status = store.get(parent).map_or("", |e| e.ticket.status.as_str());
+        return Err(OpError::Conflict(format!(
+            "parent {parent} is {status}; reopen it first, or set \
+             `subticket_under_finished_parent: reopen`"
+        )));
+    }
+    Ok(())
+}
+
 fn slug(title: &str) -> String {
     let mut out = String::new();
     for c in title.chars() {
@@ -255,6 +280,11 @@ pub fn create(store: &Store, dir: &Path, new: NewTicket) -> Result<Created, OpEr
             .ok_or_else(|| OpError::Invalid("no todo status configured".into()))?,
     };
     check_status(store, &status)?;
+    check_parent_open(
+        store,
+        new.parent.as_deref(),
+        store.config().category_of(&status),
+    )?;
     if let Some(due) = &new.due {
         check_due(due)?;
     }
@@ -391,6 +421,10 @@ pub fn update(
         .clone()
         .unwrap_or_else(|| t.blocked_by.clone());
     let related = update.related.clone().unwrap_or_else(|| t.related.clone());
+    if update.status.is_some() || update.parent.is_some() {
+        let status = update.status.as_deref().unwrap_or(&t.status);
+        check_parent_open(store, parent.as_deref(), store.config().category_of(status))?;
+    }
     if update.parent.is_some() || update.blocked_by.is_some() || update.related.is_some() {
         check_links(store, id, parent.as_deref(), &blocked_by, &related)?;
         if update.parent.is_some() {
@@ -592,6 +626,61 @@ mod tests {
         ));
         forget_tombstone(&store, "ST-1").unwrap();
         assert!(!Store::scan(store.config()).is_tombstoned("ST-1"));
+    }
+
+    fn refuse_setup() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "p.md", &ticket("P", "done", ""));
+        write(dir.path(), "c.md", &ticket("C", "todo", ""));
+        write(dir.path(), "k.md", &ticket("K", "done", "parent: P\n"));
+        let config =
+            Config::parse("subticket_under_finished_parent: refuse\n", dir.path()).unwrap();
+        let store = Store::scan(&config);
+        (dir, store)
+    }
+
+    #[test]
+    fn refuse_mode_blocks_new_and_started_subtickets_under_finished_parents() {
+        let (dir, store) = refuse_setup();
+        let mut n = new("child");
+        n.parent = Some("P".into());
+        assert!(matches!(
+            create(&store, dir.path(), n.clone()),
+            Err(OpError::Conflict(m)) if m.contains("reopen it first")
+        ));
+        // A sub-ticket that is itself finished may still be added.
+        n.status = Some("done".into());
+        assert!(create(&store, dir.path(), n).is_ok());
+
+        let start =
+            |id: &str, json: &str| update(&store, id, &serde_json::from_str(json).unwrap(), NOW);
+        assert!(matches!(
+            start("K", r#"{"status":"in-progress"}"#),
+            Err(OpError::Conflict(_))
+        ));
+        assert!(matches!(
+            start("K", r#"{"status":"todo"}"#),
+            Err(OpError::Conflict(_))
+        ));
+        assert!(matches!(
+            start("C", r#"{"parent":"P"}"#),
+            Err(OpError::Conflict(_))
+        ));
+        assert!(start("K", r#"{"status":"cancelled"}"#).is_ok());
+        assert!(start("C", r#"{"status":"in-progress"}"#).is_ok());
+    }
+
+    #[test]
+    fn reopen_mode_allows_subtickets_under_finished_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "p.md", &ticket("P", "done", ""));
+        write(dir.path(), "k.md", &ticket("K", "todo", "parent: P\n"));
+        let store = Store::scan(&Config::default_for(dir.path()));
+        let up: Update = serde_json::from_str(r#"{"status":"in-progress"}"#).unwrap();
+        assert!(update(&store, "K", &up, NOW).is_ok());
+        let mut n = new("child");
+        n.parent = Some("P".into());
+        assert!(create(&store, dir.path(), n).is_ok());
     }
 
     #[test]

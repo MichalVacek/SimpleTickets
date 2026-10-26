@@ -373,11 +373,31 @@ impl Store {
             .category_of(&self.tickets.get(id)?.ticket.status)
     }
 
+    /// True when review is enabled and all sub-tickets are finished with at
+    /// least one done, but the parent itself is not done: it awaits review.
+    pub fn is_ready_for_review(&self, id: &str) -> bool {
+        if self.config.review_status().is_none() {
+            return false;
+        }
+        let kids: Vec<Category> = self
+            .children_of(id)
+            .iter()
+            .filter_map(|c| self.own_category(c))
+            .collect();
+        !kids.is_empty()
+            && kids
+                .iter()
+                .all(|c| matches!(c, Category::Done | Category::Cancelled))
+            && kids.contains(&Category::Done)
+            && self.own_category(id) != Some(Category::Done)
+    }
+
     /// The category of a ticket with sub-tickets is derived from them; any
     /// other ticket uses its own status.
     ///
     /// - any sub-ticket in progress, or some done while others remain open: in progress
-    /// - all sub-tickets finished: done if at least one is done, otherwise cancelled
+    /// - all sub-tickets finished: done if at least one is done (in progress while
+    ///   awaiting review, see [`Store::is_ready_for_review`]), otherwise cancelled
     /// - otherwise: todo
     ///
     /// Sub-tickets with unmapped statuses are ignored.
@@ -397,7 +417,13 @@ impl Store {
             .all(|c| matches!(c, Category::Done | Category::Cancelled));
         Some(if all_finished {
             if has(Category::Done) {
-                Category::Done
+                // With review enabled, finished work only counts as done once the
+                // parent itself has been marked done.
+                if self.config.review_status().is_some() && own != Some(Category::Done) {
+                    Category::InProgress
+                } else {
+                    Category::Done
+                }
             } else {
                 Category::Cancelled
             }
@@ -730,6 +756,49 @@ mod tests {
             Category::Cancelled
         );
         assert_eq!(parent_with(&["done", "done"]), Category::Done);
+    }
+
+    fn review_config(dir: &Path) -> Config {
+        Config::parse(
+            "statuses:\n  todo: [todo]\n  in-progress: [in-progress, ready-for-review]\n  done: [done]\n  cancelled: [cancelled]\nready_for_review: true\n",
+            dir,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn finished_children_put_the_parent_in_review_instead_of_done() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "p.md", &ticket("P", "in-progress", ""));
+        write(d.path(), "c1.md", &ticket("C1", "done", "parent: P\n"));
+        write(d.path(), "c2.md", &ticket("C2", "cancelled", "parent: P\n"));
+        let s = Store::scan(&review_config(d.path()));
+        assert!(s.is_ready_for_review("P"));
+        assert_eq!(s.effective_category("P"), Some(Category::InProgress));
+        // Without the option the parent is simply done.
+        let s = scan(d.path());
+        assert!(!s.is_ready_for_review("P"));
+        assert_eq!(s.effective_category("P"), Some(Category::Done));
+    }
+
+    #[test]
+    fn parent_marked_done_after_review_stays_done() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "p.md", &ticket("P", "done", ""));
+        write(d.path(), "c.md", &ticket("C", "done", "parent: P\n"));
+        let s = Store::scan(&review_config(d.path()));
+        assert!(!s.is_ready_for_review("P"));
+        assert_eq!(s.effective_category("P"), Some(Category::Done));
+    }
+
+    #[test]
+    fn all_cancelled_children_are_not_ready_for_review() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "p.md", &ticket("P", "todo", ""));
+        write(d.path(), "c.md", &ticket("C", "cancelled", "parent: P\n"));
+        let s = Store::scan(&review_config(d.path()));
+        assert!(!s.is_ready_for_review("P"));
+        assert_eq!(s.effective_category("P"), Some(Category::Cancelled));
     }
 
     #[test]

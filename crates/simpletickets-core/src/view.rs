@@ -30,6 +30,7 @@ pub fn ticket_json(store: &Store, entry: &IndexedTicket, detail: bool) -> Value 
         "extra": serde_json::to_value(&t.extra).unwrap_or(Value::Null),
         "path": entry.path.display().to_string(),
         "frozen": store.is_frozen(&t.id),
+        "ready_for_review": store.is_ready_for_review(&t.id),
     });
     if detail {
         let body = fs::read_to_string(&entry.path)
