@@ -81,12 +81,20 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 - v0.1 platform: native binary on Mac first, Docker second.
 - v0.1 done: core plus a minimal MCP plugin so a client can list and update tickets end to end.
 - Language: Rust.
+- Rules run after every scan (startup, periodic, watcher, API), so a transition missed while the daemon was down or a watcher dropped an event is picked up by the next scan.
+- Cancelled tickets unblock dependents by default (`cancelled_unblocks`, configurable). Blocked state is derived, so reopening a done ticket re-blocks its dependents without a write; in-progress and done dependents get `blocked-in-progress` and `done-while-blocked` warnings.
+- Known ticket IDs are persisted in `.simpletickets/known-ids.json`. A known ID that goes missing is a tombstone: links keep their meaning and a missing blocker stays open until the tombstone is acknowledged (`forget`, `DELETE /v1/tombstones/{id}`). IDs of tombstones are not reused.
+- An unreadable root is offline: its tickets keep their last known index entries, are frozen (no rule touches them, no writes, no unblocking), and it is surfaced in doctor, health and a `root.offline` event; it recovers by itself on the next scan.
+- One rule-running daemon per folder through a heartbeat lease in `.simpletickets/daemon.lock` (stale after 30 seconds). CLI commands do not need the lease; compare-and-swap protects their writes.
+- Parent "ready for review": with `ready_for_review` on, a parent whose sub-tickets are all finished (one done at least) is set to `review_status` (an in-progress status) instead of counting as done; only a human marks it done.
+- A sub-ticket starting under a done or cancelled parent either reopens the parent with a warning (`reopen`, default) or is refused by the CLI and API (`refuse`), configured by `subticket_under_finished_parent`.
+- Rule warnings are persisted in `.simpletickets/warnings.json`, exposed by doctor and announced with `warning.raised`. Conditions clear with their cause; events are kept as capped history.
+- Duplicate IDs: the older file (modification time, then path) keeps the ID in the index, the copies are conflicted and reported by doctor; `reassign-id` gives a copy a new ID by rewriting only its frontmatter `id` with compare-and-swap.
 
 ## Open questions
 
-- Event-driven rules can miss transitions while the daemon is down or a watcher drops events. Is startup scan plus periodic scan enough, or do rules also need to run after each periodic scan?
-- Ticket lifecycle details: do cancelled tickets unblock dependents (default yes, configurable)? What happens when a done ticket is reopened, or a sub-ticket starts under a done parent?
-- Rule-engine concurrency: one daemon per root (lock/lease) when folders sync across machines.
+- Offline detection is per root: an unreadable subfolder inside a readable root is reported by doctor, but its tickets are covered by tombstones only, not frozen.
+- The lease compares heartbeats with the local clock, so a large clock difference between machines sharing a folder can make a live lease look stale. Should it carry a host name, or use file locks where the file system supports them?
 - Event stream contract and API versioning for out-of-process plugins.
 - Plugin discovery, install and lifecycle (who starts and supervises plugin processes).
 - Config schema: tags with custom logging, status-to-category mapping, roots, auto-scan folders.

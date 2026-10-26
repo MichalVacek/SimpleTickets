@@ -37,6 +37,8 @@ simpletickets list --field team=core --json
 simpletickets show ST-1
 simpletickets set-status ST-1 done
 simpletickets doctor
+simpletickets forget ST-2
+simpletickets reassign-id ST-4 --path ~/tickets/copy-of-st-4.md
 simpletickets rescan --dry-run
 simpletickets templates
 ```
@@ -45,7 +47,8 @@ simpletickets templates
 - `list` filters: `--status`, `--category`, `--priority`, `--tag`, `--parent`, `--title`, `--blocked`, `--due-by`, `--field key=value`. Add `--json` for machine-readable output.
 - `set-status`, `create` and `rescan` run the rules afterwards. A sub-ticket in progress sets its parent to in progress; a done (or, by default, cancelled) blocker stops blocking. Parents inside `parent_folder` are specification files: their state is derived and never written. Automatic changes are appended to `.simpletickets/audit.jsonl`; `rescan --dry-run` shows them without writing.
 - Custom templates are Markdown files in `.simpletickets/templates/NAME.md` using `{{title}}`, `{{id}}` and `{{date}}`.
-- `doctor` exits non-zero when it finds duplicate IDs, malformed frontmatter, missing link targets, cycles or orphans.
+- `doctor` exits non-zero when it finds duplicate IDs, malformed frontmatter, missing link targets, cycles, orphans or an offline root. It also lists the rule warnings recorded by the last rule run (see below); warnings never change the exit code.
+- `forget ID` acknowledges a deleted ticket (see Data safety). `reassign-id ID [--path FILE]` resolves a duplicate ID (see Duplicate IDs).
 
 ## Install
 
@@ -113,18 +116,22 @@ simpletickets daemon --port 7878 --scan-interval 60
 
 Other flags: `--no-watch` (periodic scans only), `--poll` (see Docker), `--token-file`, `--no-update-check`.
 
+Events published besides the scan and rule events: `root.offline`, `root.online`, `warning.raised`, `tombstone.forgotten`, `ticket.id_reassigned`, `lease.lost`, `lease.acquired`, `state.error`.
+
 The daemon scans all folders on startup, watches them for changes, rescans periodically and runs the rules after each scan. The API listens on `127.0.0.1` only and requires `Authorization: Bearer <token>`. The token is generated on first run and stored in `.simpletickets/token` (owner-only permissions; `--token-file` overrides the location). Requests whose `Host` is not a localhost name are refused.
 
 | Route | Purpose |
 |---|---|
-| `GET /v1/health` | version, ticket count and `update` (`null`, or the newer release found by the update check) |
+| `GET /v1/health` | version, `status` (`ok` or `degraded` while a root is offline), ticket and frozen counts, `offline_roots`, `rules_enabled` and `update` (`null`, or the newer release found by the update check) |
 | `GET /v1/parents` | parent tickets |
 | `GET /v1/tickets?status=&category=&priority=&tag=&parent=&title=&blocked=&due_by=&field.<key>=&limit=` | list and filter |
 | `GET /v1/tickets/{id}` | one ticket with body and derived data |
 | `POST /v1/tickets` | create (`title`, `status`, `priority`, `due`, `tags`, `parent`, `blocked_by`, `related`, `template`, `body`, `role`) |
 | `PATCH /v1/tickets/{id}` | update; `null` clears `priority`, `due`, `parent` |
 | `POST /v1/rescan` | scan and run the rules now |
-| `GET /v1/doctor` | consistency report |
+| `GET /v1/doctor` | consistency report: `clean`, `issues`, `tombstones` and the recorded rule `warnings` |
+| `GET /v1/tombstones`, `DELETE /v1/tombstones/{id}` | deleted tickets that are still referenced; acknowledge one |
+| `POST /v1/tickets/{id}/reassign-id` | give a conflicted copy of a duplicated ID a new one (`{"path": "..."}` optional) |
 | `GET /v1/config`, `PUT /v1/config` | read or replace the configuration (`{"yaml": "..."}`); a change that needs a migration is refused with its plan unless `"migrate": true` is sent |
 | `POST /v1/migration` | `{"yaml": "...", "dry_run": true}` returns the migration plan for a new config; `"dry_run": false` applies it |
 | `GET /v1/migration`, `POST /v1/migration/resume` | journal of the last or current migration; finish an interrupted one |

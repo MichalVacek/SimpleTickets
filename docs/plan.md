@@ -74,7 +74,6 @@ plugins/
 
 ## Open questions
 
-- Event-driven rules versus rules after each periodic scan (slice 6 runs reconcilers after every scan; revisit if too costly).
 - Event stream contract and API versioning (slice 8 starts at `/v1`).
 - Plugin discovery and supervision (the MCP plugin is started by its client; supervision comes later).
 - Windows as a real service, signed releases, musl builds.
