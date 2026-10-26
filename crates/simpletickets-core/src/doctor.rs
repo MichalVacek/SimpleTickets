@@ -17,11 +17,13 @@ pub enum Issue {
     Unreadable { path: PathBuf, message: String },
     /// Several files claim the same ID.
     DuplicateId { id: String, paths: Vec<PathBuf> },
-    /// A link points at an ID that no ticket has.
+    /// A link points at an ID that no ticket has. `tombstoned` marks an ID that
+    /// existed earlier: a missing blocker of that kind keeps blocking.
     MissingTarget {
         from: String,
         field: &'static str,
         target: String,
+        tombstoned: bool,
     },
     /// A ticket's status is not mapped to a category.
     UnknownStatus { id: String, status: String },
@@ -60,7 +62,25 @@ impl fmt::Display for Issue {
                 from,
                 field,
                 target,
+                tombstoned: false,
             } => write!(f, "{from}: `{field}` points to missing ticket {target}"),
+            Issue::MissingTarget {
+                from,
+                field,
+                target,
+                tombstoned: true,
+            } => {
+                let effect = if *field == "blocked_by" {
+                    "it still blocks"
+                } else {
+                    "the link is kept"
+                };
+                write!(
+                    f,
+                    "{from}: `{field}` points to ticket {target}, which existed before but is missing now \
+                     (tombstone: {effect} until you run `forget {target}`)"
+                )
+            }
             Issue::UnknownStatus { id, status } => {
                 write!(f, "{id}: status `{status}` is not mapped to a category")
             }
@@ -142,6 +162,7 @@ pub fn check(store: &Store) -> Report {
                     from: t.id.clone(),
                     field,
                     target: target.clone(),
+                    tombstoned: store.is_tombstoned(target),
                 });
             }
         }
@@ -316,6 +337,27 @@ mod tests {
             .issues
             .iter()
             .any(|i| matches!(i, Issue::UnknownStatus { .. })));
+    }
+
+    #[test]
+    fn missing_links_to_known_ids_are_reported_as_tombstones() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "b.md", &ticket("B", "done", ""));
+        write(d.path(), "a.md", &ticket("A", "todo", "blocked_by: [B]\n"));
+        Store::scan(&Config::default_for(d.path()))
+            .record_known()
+            .unwrap();
+        std::fs::remove_file(d.path().join("b.md")).unwrap();
+        let r = report(d.path());
+        assert!(r.issues.iter().any(|i| matches!(
+            i,
+            Issue::MissingTarget { target, tombstoned: true, .. } if target == "B"
+        )));
+        let text = r.to_string();
+        assert!(
+            text.contains("tombstone") && text.contains("forget B"),
+            "{text}"
+        );
     }
 
     #[test]

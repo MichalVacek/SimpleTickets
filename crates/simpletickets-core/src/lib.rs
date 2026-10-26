@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod frontmatter;
 pub mod hash;
 pub mod id;
+pub mod known;
 pub mod migration;
 pub mod ops;
 pub mod query;

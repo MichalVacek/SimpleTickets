@@ -73,6 +73,8 @@ pub enum LogLevel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    /// The tickets folder: holds this config and the `.simpletickets` state folder.
+    pub dir: PathBuf,
     /// Prefix of generated ticket IDs.
     pub id_prefix: String,
     pub roots: Vec<Root>,
@@ -127,6 +129,7 @@ impl Config {
     /// Default configuration for a tickets folder: that folder is the only root.
     pub fn default_for(dir: &Path) -> Config {
         Config {
+            dir: dir.to_path_buf(),
             id_prefix: "ST".into(),
             roots: vec![Root {
                 path: dir.to_path_buf(),
@@ -215,6 +218,7 @@ impl Config {
         }
 
         Ok(Config {
+            dir: dir.to_path_buf(),
             id_prefix,
             roots,
             auto_scan: raw.auto_scan.iter().map(|p| resolve(p)).collect(),

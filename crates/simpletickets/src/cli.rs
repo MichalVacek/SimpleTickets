@@ -12,7 +12,7 @@ use simpletickets_core::rules::{self, RunOptions, RunReport};
 use simpletickets_core::state::{audit_log_path, ensure_state_dir};
 use simpletickets_core::store::Store;
 use simpletickets_core::templates;
-use simpletickets_core::view::ticket_json;
+use simpletickets_core::view::{doctor_json, ticket_json};
 use simpletickets_core::write::WriteOptions;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -51,6 +51,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Acknowledge a deleted ticket so links to it stop counting (releases its blocked tickets)
+    Forget { id: String },
     /// Scan all folders and run the rules
     Rescan {
         /// Show the changes the rules would make without writing them
@@ -283,6 +285,9 @@ fn print_rules(report: &RunReport) {
     for w in &report.warnings {
         println!("warning {}: {}", w.id, w.message);
     }
+    if let Some(e) = &report.state_error {
+        println!("state: {e}");
+    }
 }
 
 pub fn run(cli: Cli) -> Result<ExitCode, String> {
@@ -309,11 +314,17 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             ctx.reconcile(ctx.scan());
             Ok(ExitCode::SUCCESS)
         }
+        Command::Forget { id } => {
+            ops::forget_tombstone(&ctx.scan(), &id).map_err(|e| e.to_string())?;
+            println!("forgot {id}");
+            ctx.reconcile(ctx.scan());
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Doctor { json } => {
-            let report = doctor::check(&ctx.scan());
+            let store = ctx.scan();
+            let report = doctor::check(&store);
             if json {
-                let issues: Vec<String> = report.issues.iter().map(ToString::to_string).collect();
-                println!("{}", json!({"clean": report.is_clean(), "issues": issues}));
+                println!("{}", doctor_json(&store));
             } else {
                 print!("{report}");
             }

@@ -53,6 +53,8 @@ pub struct RunReport {
     /// Changes that could not be applied, with the reason.
     pub skipped: Vec<Skipped>,
     pub warnings: Vec<Warning>,
+    /// Set when the state files next to the tickets could not be updated.
+    pub state_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +200,9 @@ pub fn reconcile(
             break;
         }
         store = Store::scan(store.config());
+    }
+    if let Err(e) = store.record_known() {
+        report.state_error = Some(format!("known IDs: {e}"));
     }
     (store, report)
 }

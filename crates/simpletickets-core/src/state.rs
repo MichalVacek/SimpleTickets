@@ -30,6 +30,10 @@ pub fn audit_log_path(dir: &Path) -> PathBuf {
     state_dir(dir).join("audit.jsonl")
 }
 
+pub fn known_ids_path(dir: &Path) -> PathBuf {
+    state_dir(dir).join("known-ids.json")
+}
+
 pub fn templates_dir(dir: &Path) -> PathBuf {
     state_dir(dir).join("templates")
 }

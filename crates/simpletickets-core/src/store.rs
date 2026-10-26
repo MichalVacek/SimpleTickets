@@ -5,9 +5,12 @@
 
 use crate::config::{Category, Config, RootKind};
 use crate::hash::content_hash;
+use crate::known::{self, KnownEntry};
+use crate::state::known_ids_path;
 use crate::ticket::{has_ticket_marker, Ticket};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -32,6 +35,17 @@ pub enum ScanProblem {
     },
 }
 
+/// An ID that was known earlier but is not found in any root now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tombstone {
+    pub id: String,
+    /// Where the ticket was last seen.
+    pub path: String,
+    pub first_seen: String,
+    /// Tickets whose `parent`, `blocked_by` or `related` still point at it.
+    pub referenced_by: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct Store {
     config: Config,
@@ -42,6 +56,10 @@ pub struct Store {
     children: BTreeMap<String, Vec<String>>,
     blocks: BTreeMap<String, Vec<String>>,
     related_by: BTreeMap<String, Vec<String>>,
+    /// Every ID seen by earlier scans.
+    known: BTreeMap<String, KnownEntry>,
+    /// Set when the record of known IDs could not be read; it is then never rewritten.
+    known_error: Option<String>,
 }
 
 impl Store {
@@ -134,6 +152,17 @@ impl Store {
             }
         }
 
+        let (known, known_error) = match known::load(&config.dir) {
+            Ok(k) => (k, None),
+            Err(message) => {
+                problems.push(ScanProblem::Unreadable {
+                    path: known_ids_path(&config.dir),
+                    message: message.clone(),
+                });
+                (BTreeMap::new(), Some(message))
+            }
+        };
+
         let mut store = Store {
             config: config.clone(),
             tickets,
@@ -142,6 +171,8 @@ impl Store {
             children: BTreeMap::new(),
             blocks: BTreeMap::new(),
             related_by: BTreeMap::new(),
+            known,
+            known_error,
         };
         store.index_links();
         store
@@ -205,6 +236,49 @@ impl Store {
         self.duplicates.contains_key(id)
     }
 
+    /// True if `id` was known earlier and is not in the index now.
+    pub fn is_tombstoned(&self, id: &str) -> bool {
+        self.known.contains_key(id) && !self.tickets.contains_key(id)
+    }
+
+    /// All tombstones, ordered by ID.
+    pub fn tombstones(&self) -> Vec<Tombstone> {
+        self.known
+            .iter()
+            .filter(|(id, _)| !self.tickets.contains_key(*id))
+            .map(|(id, entry)| {
+                let mut referenced_by: Vec<String> = [
+                    self.children_of(id),
+                    self.blocked_by_me(id),
+                    self.related_to_me(id),
+                ]
+                .concat();
+                referenced_by.sort();
+                referenced_by.dedup();
+                Tombstone {
+                    id: id.clone(),
+                    path: entry.path.clone(),
+                    first_seen: entry.first_seen.clone(),
+                    referenced_by,
+                }
+            })
+            .collect()
+    }
+
+    /// Adds the indexed tickets to the persistent record of known IDs. A no-op
+    /// when that record could not be read, so it is never overwritten.
+    pub fn record_known(&self) -> io::Result<()> {
+        if self.known_error.is_some() {
+            return Ok(());
+        }
+        known::record(
+            &self.config.dir,
+            self.tickets
+                .iter()
+                .map(|(id, e)| (id.as_str(), e.path.as_path())),
+        )
+    }
+
     /// Tickets that name `id` as their parent.
     pub fn children_of(&self, id: &str) -> &[String] {
         slice(&self.children, id)
@@ -235,14 +309,16 @@ impl Store {
     }
 
     /// A ticket is blocked while any of its blockers is neither done nor
-    /// (when configured) cancelled. Blockers that do not exist do not block.
+    /// (when configured) cancelled. A blocker that was never known does not
+    /// block; one that was known but is missing now (a tombstone) keeps blocking
+    /// until the tombstone is acknowledged.
     pub fn is_blocked(&self, id: &str) -> bool {
         !self.open_blockers(id).is_empty()
     }
 
     fn is_open_blocker(&self, blocker: &str) -> bool {
         let Some(b) = self.tickets.get(blocker) else {
-            return false;
+            return self.known.contains_key(blocker);
         };
         match self.config.category_of(&b.ticket.status) {
             Some(Category::Done) => false,
@@ -462,6 +538,53 @@ mod tests {
         assert_eq!(s.open_blockers("W"), ["B2"]);
         assert!(s.is_blocked("W"));
         assert!(!s.is_blocked("B1"));
+    }
+
+    #[test]
+    fn missing_known_blocker_stays_open_until_forgotten() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "w.md", &ticket("W", "todo", "blocked_by: [B]\n"));
+        write(d.path(), "b.md", &ticket("B", "done", ""));
+        let s = scan(d.path());
+        s.record_known().unwrap();
+        assert!(!s.is_blocked("W"));
+
+        fs::remove_file(d.path().join("b.md")).unwrap();
+        let s = scan(d.path());
+        assert!(s.is_tombstoned("B"));
+        assert_eq!(s.open_blockers("W"), ["B"]);
+        let tombs = s.tombstones();
+        assert_eq!(tombs.len(), 1);
+        assert_eq!(tombs[0].referenced_by, ["W"]);
+        assert!(tombs[0].path.ends_with("b.md"));
+
+        assert!(known::forget(d.path(), "B").unwrap());
+        let s = scan(d.path());
+        assert!(!s.is_tombstoned("B"));
+        assert!(!s.is_blocked("W"));
+    }
+
+    #[test]
+    fn restored_ticket_clears_its_tombstone() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "b.md", &ticket("B", "done", ""));
+        scan(d.path()).record_known().unwrap();
+        fs::rename(d.path().join("b.md"), d.path().join("elsewhere.txt")).unwrap();
+        assert!(scan(d.path()).is_tombstoned("B"));
+        fs::rename(d.path().join("elsewhere.txt"), d.path().join("b2.md")).unwrap();
+        assert!(!scan(d.path()).is_tombstoned("B"));
+    }
+
+    #[test]
+    fn unreadable_known_record_is_reported_and_not_overwritten() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "a.md", &ticket("A", "todo", ""));
+        write(d.path(), ".simpletickets/known-ids.json", "{oops");
+        let s = scan(d.path());
+        assert_eq!(s.problems().len(), 1);
+        s.record_known().unwrap();
+        let text = fs::read_to_string(d.path().join(".simpletickets/known-ids.json")).unwrap();
+        assert_eq!(text, "{oops");
     }
 
     #[test]

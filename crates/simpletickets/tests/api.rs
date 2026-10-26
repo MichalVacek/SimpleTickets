@@ -28,6 +28,8 @@ fn token_is_required_on_every_route() {
         ("POST", "/v1/migration"),
         ("GET", "/v1/events"),
         ("GET", "/v1/audit"),
+        ("GET", "/v1/tombstones"),
+        ("DELETE", "/v1/tombstones/ST-1"),
         ("GET", "/v1/nonexistent"),
     ];
     for (method, path) in routes {
@@ -488,4 +490,42 @@ fn hand_edited_config_suggests_a_migration_event() {
         dir.path().join("specs/P-1.md").exists(),
         "nothing moves without an explicit apply"
     );
+}
+
+#[test]
+fn deleted_blocker_stays_open_until_its_tombstone_is_forgotten() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "a.md", &ticket_text("A", "done", ""));
+    write(
+        dir.path(),
+        "b.md",
+        &ticket_text("B", "todo", "blocked_by: [A]\n"),
+    );
+    let api = start(dir.path(), false, SLOW);
+    assert_eq!(api.get("/v1/tickets/B").1["blocked"], false);
+
+    std::fs::remove_file(dir.path().join("a.md")).unwrap();
+    api.post("/v1/rescan", "");
+    let (_, b) = api.get("/v1/tickets/B");
+    assert_eq!(b["blocked"], true);
+    assert_eq!(b["open_blockers"][0], "A");
+
+    let (_, doctor) = api.get("/v1/doctor");
+    assert_eq!(doctor["clean"], false);
+    assert!(doctor["issues"][0].as_str().unwrap().contains("tombstone"));
+    let (_, tombs) = api.get("/v1/tombstones");
+    assert_eq!(tombs[0]["id"], "A");
+    assert_eq!(tombs[0]["referenced_by"][0], "B");
+
+    assert_eq!(api.call("DELETE", "/v1/tombstones/B", None).0, 400);
+    assert_eq!(api.call("DELETE", "/v1/tombstones/NOPE", None).0, 404);
+    assert_eq!(api.call("DELETE", "/v1/tombstones/A", None).0, 200);
+    assert_eq!(api.get("/v1/tickets/B").1["blocked"], false);
+    assert_eq!(api.get("/v1/tombstones").1.as_array().unwrap().len(), 0);
+    let (_, events) = api.get("/v1/events");
+    assert!(events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "tombstone.forgotten"));
 }

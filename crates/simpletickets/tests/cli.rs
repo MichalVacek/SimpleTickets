@@ -205,3 +205,25 @@ fn migrate_plan_apply_status_and_resume() {
     assert!(ok(d, &["migrate", "plan", new]).contains("no migration needed"));
     assert!(ok(d, &["migrate", "status", "--json"]).contains("\"complete\""));
 }
+
+#[test]
+fn forget_releases_tickets_blocked_by_a_deleted_ticket() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let a = create_id(d, &["Blocker"]);
+    let b = create_id(d, &["Waiting", "--blocked-by", &a]);
+    ok(d, &["set-status", &a, "done"]);
+    std::fs::remove_file(d.join(format!("{a}-blocker.md"))).unwrap();
+
+    assert!(ok(d, &["list", "--blocked", "true"]).contains("Waiting"));
+    let out = st(d, &["doctor"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("tombstone"));
+
+    assert!(!st(d, &["forget", &b]).status.success());
+    assert!(!st(d, &["forget", "ST-99"]).status.success());
+    assert!(ok(d, &["forget", &a]).contains("forgot"));
+    assert!(!ok(d, &["list", "--blocked", "true"]).contains("Waiting"));
+    let out = String::from_utf8(st(d, &["doctor"]).stdout).unwrap();
+    assert!(out.contains("points to missing ticket") && !out.contains("tombstone"));
+}

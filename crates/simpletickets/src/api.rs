@@ -3,12 +3,11 @@
 use crate::daemon::{Inner, Shared};
 use serde_json::{json, Value};
 use simpletickets_core::config::{self, Config};
-use simpletickets_core::doctor;
 use simpletickets_core::migration::{self, MigrationError};
 use simpletickets_core::ops::{self, NewTicket, OpError, Update};
 use simpletickets_core::query::{self, Filter};
 use simpletickets_core::templates;
-use simpletickets_core::view::ticket_json;
+use simpletickets_core::view::{doctor_json, ticket_json, tombstones_json};
 use simpletickets_core::write::WriteOptions;
 use std::io::Read;
 use std::sync::atomic::Ordering;
@@ -203,10 +202,13 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
         (["v1", "rescan"], "POST") => reply(200, shared.rescan("api").0),
         (["v1", "doctor"], "GET") => {
             let inner = shared.lock();
-            let report = doctor::check(&inner.store);
-            let issues: Vec<String> = report.issues.iter().map(ToString::to_string).collect();
-            reply(200, json!({"clean": report.is_clean(), "issues": issues}))
+            reply(200, doctor_json(&inner.store))
         }
+        (["v1", "tombstones"], "GET") => {
+            let inner = shared.lock();
+            reply(200, tombstones_json(&inner.store))
+        }
+        (["v1", "tombstones", id], "DELETE") => forget_tombstone(shared, id),
         (["v1", "config"], "GET") => get_config(shared),
         (["v1", "config"], "PUT") => put_config(shared, req),
         (["v1", "migration"], "GET") => match migration::load(&shared.dir) {
@@ -230,9 +232,9 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
         (["v1", "templates"], "GET") => reply(200, json!(templates::list(&shared.dir))),
         (
             ["v1", "health" | "parents" | "tickets" | "rescan" | "doctor" | "config" | "migration"
-            | "events" | "audit" | "templates"]
+            | "events" | "audit" | "templates" | "tombstones"]
             | ["v1", "migration", "resume"]
-            | ["v1", "tickets", _],
+            | ["v1", "tickets" | "tombstones", _],
             _,
         ) => error(405, "method not allowed"),
         _ => error(404, "not found"),
@@ -317,6 +319,18 @@ fn after_write(shared: &Shared, inner: &mut Inner, reason: &str, id: &str, statu
         Some(e) => reply(status, ticket_json(&inner.store, e, true)),
         None => error(500, format!("ticket {id} not found after write")),
     }
+}
+
+fn forget_tombstone(shared: &Shared, id: &str) -> Reply {
+    let mut inner = shared.lock();
+    if let Err(e) = ops::forget_tombstone(&inner.store, id) {
+        return e.into();
+    }
+    shared
+        .events
+        .publish("tombstone.forgotten", json!({"id": id}));
+    shared.rescan_locked(&mut inner, "forget");
+    reply(200, json!({"forgotten": id}))
 }
 
 fn get_config(shared: &Shared) -> Reply {

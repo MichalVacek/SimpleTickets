@@ -1,5 +1,6 @@
 //! JSON representation of tickets, shared by the CLI and the HTTP API.
 
+use crate::doctor;
 use crate::frontmatter::Document;
 use crate::store::{IndexedTicket, Store};
 use serde_json::{json, Value};
@@ -37,6 +38,34 @@ pub fn ticket_json(store: &Store, entry: &IndexedTicket, detail: bool) -> Value 
         v["body"] = json!(body);
     }
     v
+}
+
+/// The tombstones of a store as JSON.
+pub fn tombstones_json(store: &Store) -> Value {
+    let items: Vec<Value> = store
+        .tombstones()
+        .into_iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "path": t.path,
+                "first_seen": t.first_seen,
+                "referenced_by": t.referenced_by,
+            })
+        })
+        .collect();
+    Value::Array(items)
+}
+
+/// The doctor report as JSON: `clean`, the `issues` as text, and structured detail.
+pub fn doctor_json(store: &Store) -> Value {
+    let report = doctor::check(store);
+    let issues: Vec<String> = report.issues.iter().map(ToString::to_string).collect();
+    json!({
+        "clean": report.is_clean(),
+        "issues": issues,
+        "tombstones": tombstones_json(store),
+    })
 }
 
 #[cfg(test)]

@@ -262,6 +262,7 @@ pub fn create(store: &Store, dir: &Path, new: NewTicket) -> Result<Created, OpEr
 
     let mut taken: HashSet<String> = store.ids().into_iter().collect();
     taken.extend(store.duplicates().keys().cloned());
+    taken.extend(store.tombstones().into_iter().map(|t| t.id));
     let template = new.template.as_deref().unwrap_or(DEFAULT_TEMPLATE);
     for _ in 0..8 {
         let id = next_id(&store.config().id_prefix, &taken, |_| false);
@@ -305,6 +306,22 @@ pub fn create(store: &Store, dir: &Path, new: NewTicket) -> Result<Created, OpEr
         }
     }
     Err(OpError::Conflict("could not find a free ticket ID".into()))
+}
+
+/// Acknowledges a tombstone: the missing ticket `id` was deleted on purpose,
+/// so links to it stop counting (a missing blocker no longer blocks).
+pub fn forget_tombstone(store: &Store, id: &str) -> Result<(), OpError> {
+    if store.contains(id) {
+        return Err(OpError::Invalid(format!(
+            "{id} is an existing ticket; only missing tickets can be forgotten"
+        )));
+    }
+    if !store.is_tombstoned(id) {
+        return Err(OpError::NotFound(format!("no tombstone for {id}")));
+    }
+    crate::known::forget(&store.config().dir, id)
+        .map(|_| ())
+        .map_err(|e| OpError::Io(e.to_string()))
 }
 
 /// Writes a new file without replacing an existing one.
@@ -550,6 +567,26 @@ mod tests {
         assert!(bad("A", r#"{"parent":"B"}"#).contains("sub-tickets"));
         let ok: Update = serde_json::from_str(r#"{"blocked_by":[]}"#).unwrap();
         assert!(update(&store, "B", &ok, NOW).is_ok());
+    }
+
+    #[test]
+    fn deleted_ids_are_not_reused_and_can_be_forgotten() {
+        let (dir, store) = setup();
+        store.record_known().unwrap();
+        fs::remove_file(dir.path().join("a.md")).unwrap();
+        let store = Store::scan(store.config());
+        assert_eq!(create(&store, dir.path(), new("x")).unwrap().id, "ST-2");
+        let store = Store::scan(store.config());
+        assert!(matches!(
+            forget_tombstone(&store, "ST-2"),
+            Err(OpError::Invalid(_))
+        ));
+        assert!(matches!(
+            forget_tombstone(&store, "ST-77"),
+            Err(OpError::NotFound(_))
+        ));
+        forget_tombstone(&store, "ST-1").unwrap();
+        assert!(!Store::scan(store.config()).is_tombstoned("ST-1"));
     }
 
     #[test]
