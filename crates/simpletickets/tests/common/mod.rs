@@ -42,6 +42,17 @@ impl Api {
         raw(self.addr, method, path, Some(&self.token), None, body)
     }
 
+    /// A request with extra headers; also returns the raw response head.
+    pub fn call_with(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> (u16, Value, String) {
+        raw_with(self.addr, method, path, Some(&self.token), headers, body)
+    }
+
     pub fn get(&self, path: &str) -> (u16, Value) {
         self.call("GET", path, None)
     }
@@ -71,6 +82,30 @@ pub fn raw(
     host: Option<&str>,
     body: Option<&str>,
 ) -> (u16, Value) {
+    let (status, value, _) = raw_request(addr, method, path, token, host, &[], body);
+    (status, value)
+}
+
+pub fn raw_with(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> (u16, Value, String) {
+    raw_request(addr, method, path, token, None, headers, body)
+}
+
+fn raw_request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    host: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> (u16, Value, String) {
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
@@ -81,13 +116,20 @@ pub fn raw(
     if let Some(t) = token {
         request.push_str(&format!("Authorization: Bearer {t}\r\n"));
     }
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
     request.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
     stream.write_all(request.as_bytes()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     let status = response.split(' ').nth(1).unwrap().parse().unwrap();
-    let payload = response.split_once("\r\n\r\n").map_or("", |(_, b)| b);
-    (status, serde_json::from_str(payload).unwrap_or(Value::Null))
+    let (head, payload) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+    (
+        status,
+        serde_json::from_str(payload).unwrap_or(Value::Null),
+        head.to_string(),
+    )
 }
 
 pub fn write(dir: &Path, rel: &str, text: &str) {

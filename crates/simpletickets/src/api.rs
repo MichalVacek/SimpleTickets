@@ -1,7 +1,9 @@
 //! The HTTP API under `/v1`: JSON over HTTP, token protected, loopback only.
 
 use crate::daemon::{Inner, Shared};
+use crate::idempotency::{self, Lookup};
 use serde_json::{json, Value};
+use simpletickets_core::audit::AuditEntry;
 use simpletickets_core::config::{self, Config};
 use simpletickets_core::migration::{self, MigrationError};
 use simpletickets_core::ops::{self, NewTicket, OpError, Update};
@@ -9,6 +11,8 @@ use simpletickets_core::plugin::{self, Kind};
 use simpletickets_core::query::{self, Filter};
 use simpletickets_core::search::Query;
 use simpletickets_core::templates;
+use simpletickets_core::ticket::Ticket;
+use simpletickets_core::time::now_timestamp;
 use simpletickets_core::view::{doctor_json, hit_json, ticket_json, tombstones_json};
 use simpletickets_core::write::WriteOptions;
 use std::io::Read;
@@ -19,6 +23,16 @@ use std::time::Duration;
 pub const API_VERSION: u32 = 1;
 /// Response header carrying [`API_VERSION`].
 pub const API_VERSION_HEADER: &str = "X-SimpleTickets-Api-Version";
+
+/// Request header naming who performs a write; recorded in the audit log and in events.
+pub const ACTOR_HEADER: &str = "X-SimpleTickets-Actor";
+/// Request header that makes a create or update safe to retry.
+pub const IDEMPOTENCY_HEADER: &str = "Idempotency-Key";
+/// Response header set when the answer is a stored one.
+pub const REPLAY_HEADER: &str = "Idempotent-Replayed";
+/// The actor of a write that names none.
+pub const DEFAULT_ACTOR: &str = "api";
+const MAX_ACTOR_LEN: usize = 64;
 
 const MAX_BODY: u64 = 1024 * 1024;
 const MAX_WAIT_SECONDS: u64 = 30;
@@ -31,6 +45,8 @@ pub struct Request {
     pub query: Vec<(String, String)>,
     pub authorization: Option<String>,
     pub host: Option<String>,
+    pub actor: Option<String>,
+    pub idempotency_key: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -38,10 +54,16 @@ pub struct Request {
 pub struct Reply {
     pub status: u16,
     pub body: Value,
+    /// The answer was stored from an earlier request with the same idempotency key.
+    pub replayed: bool,
 }
 
 fn reply(status: u16, body: Value) -> Reply {
-    Reply { status, body }
+    Reply {
+        status,
+        body,
+        replayed: false,
+    }
 }
 
 fn error(status: u16, message: impl Into<String>) -> Reply {
@@ -78,6 +100,11 @@ pub fn serve(server: &tiny_http::Server, shared: &Shared) {
             .with_status_code(result.status)
             .with_header(header)
             .with_header(version);
+        if result.replayed {
+            let replayed =
+                tiny_http::Header::from_bytes(REPLAY_HEADER, "true").expect("static header");
+            response = response.with_header(replayed);
+        }
         if result.status == 401 {
             let challenge =
                 tiny_http::Header::from_bytes("WWW-Authenticate", "Bearer").expect("static header");
@@ -101,6 +128,8 @@ fn read_request(raw: &mut tiny_http::Request) -> Request {
     };
     let authorization = header("Authorization");
     let host = header("Host");
+    let actor = header(ACTOR_HEADER);
+    let idempotency_key = header(IDEMPOTENCY_HEADER);
     let mut body = Vec::new();
     let _ = raw.as_reader().take(MAX_BODY + 1).read_to_end(&mut body);
     Request {
@@ -109,6 +138,8 @@ fn read_request(raw: &mut tiny_http::Request) -> Request {
         query,
         authorization,
         host,
+        actor,
+        idempotency_key,
         body,
     }
 }
@@ -149,6 +180,19 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// True for an actor name of 1 to 64 letters, digits and `. _ : @ / -`.
+pub fn is_valid_actor(actor: &str) -> bool {
+    !actor.is_empty()
+        && actor.len() <= MAX_ACTOR_LEN
+        && actor
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:@/-".contains(c))
+}
+
+fn actor_of(req: &Request) -> &str {
+    req.actor.as_deref().unwrap_or(DEFAULT_ACTOR)
+}
+
 fn is_local_host(host: &str) -> bool {
     let name = if let Some(rest) = host.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")
@@ -173,6 +217,16 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
     }
     if req.body.len() as u64 > MAX_BODY {
         return error(413, "request body too large");
+    }
+    if let Some(actor) = &req.actor {
+        if !is_valid_actor(actor) {
+            return error(
+                400,
+                format!(
+                    "{ACTOR_HEADER} must be 1 to {MAX_ACTOR_LEN} letters, digits or . _ : @ / -"
+                ),
+            );
+        }
     }
     let segments: Vec<&str> = req.path.trim_matches('/').split('/').collect();
     let method = req.method.as_str();
@@ -252,7 +306,14 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
         (["v1", "events"], "GET") => events(shared, req),
         (["v1", "audit"], "GET") => {
             let limit = num_param(req, "limit").unwrap_or(100) as usize;
-            reply(200, Value::Array(shared.audit.tail(limit)))
+            let text = |key: &str| {
+                req.query
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| v.as_str())
+            };
+            let entries = shared.audit.query(text("actor"), text("id"), limit);
+            reply(200, Value::Array(entries))
         }
         (["v1", "plugins"], "GET") => list_plugins(shared),
         (["v1", "templates"], "GET") => reply(200, json!(templates::list(&shared.dir))),
@@ -407,17 +468,112 @@ fn explicit_write() -> WriteOptions {
     }
 }
 
+/// Checks the request's idempotency key. `Ok(None)` means there is none, `Ok(Some(key))`
+/// that the request is new (pass the key to [`remember`] once it succeeded), and `Err`
+/// is the answer to send instead: the stored one for a retry, or an error.
+fn check_key(shared: &Shared, req: &Request) -> Result<Option<String>, Reply> {
+    let Some(key) = &req.idempotency_key else {
+        return Ok(None);
+    };
+    if !idempotency::is_valid_key(key) {
+        return Err(error(
+            400,
+            format!(
+                "{IDEMPOTENCY_HEADER} must be 1 to {} visible ASCII characters",
+                idempotency::MAX_KEY_LEN
+            ),
+        ));
+    }
+    let fingerprint = idempotency::fingerprint(&req.method, &req.path, &req.body);
+    let lookup = shared
+        .idempotency
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .lookup(actor_of(req), key, &fingerprint);
+    match lookup {
+        Lookup::Miss => Ok(Some(key.clone())),
+        Lookup::Replay(status, body) => Err(Reply {
+            status,
+            body,
+            replayed: true,
+        }),
+        Lookup::Mismatch => Err(error(
+            422,
+            format!("{IDEMPOTENCY_HEADER} was already used for a different request"),
+        )),
+    }
+}
+
+/// Stores a successful answer under the request's idempotency key.
+fn remember(shared: &Shared, req: &Request, key: Option<String>, answer: &Reply) {
+    let Some(key) = key else { return };
+    if !(200..300).contains(&answer.status) {
+        return;
+    }
+    let fingerprint = idempotency::fingerprint(&req.method, &req.path, &req.body);
+    shared
+        .idempotency
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record(
+            actor_of(req),
+            &key,
+            &fingerprint,
+            answer.status,
+            &answer.body,
+        );
+}
+
+fn audit_write(shared: &Shared, req: &Request, rule: &str, id: &str, change: (&str, &str, &str)) {
+    let (field, from, to) = change;
+    let entry = AuditEntry {
+        ts: now_timestamp(),
+        rule: rule.into(),
+        id: id.into(),
+        field: field.into(),
+        from: from.into(),
+        to: to.into(),
+        reason: format!("{} {}", req.method, req.path),
+        level: "info".into(),
+        actor: actor_of(req).into(),
+    };
+    if let Err(e) = shared.audit.append(&entry) {
+        shared.logger.warn(&format!("audit log: {e}"));
+    }
+}
+
 fn create_ticket(shared: &Shared, req: &Request) -> Reply {
     let new: NewTicket = match parse_body(req) {
         Ok(n) => n,
         Err(r) => return r,
     };
+    let title = new.title.clone();
     let mut inner = shared.lock();
+    let key = match check_key(shared, req) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
     let created = match ops::create(&inner.store, &shared.dir, new) {
         Ok(c) => c,
         Err(e) => return e.into(),
     };
-    after_write(shared, &mut inner, "create", &created.id, 201)
+    audit_write(
+        shared,
+        req,
+        "api.create",
+        &created.id,
+        ("ticket", "", &title),
+    );
+    let answer = after_write(
+        shared,
+        &mut inner,
+        "create",
+        &created.id,
+        201,
+        actor_of(req),
+    );
+    remember(shared, req, key, &answer);
+    answer
 }
 
 fn update_ticket(shared: &Shared, req: &Request, id: &str) -> Reply {
@@ -426,15 +582,106 @@ fn update_ticket(shared: &Shared, req: &Request, id: &str) -> Reply {
         Err(r) => return r,
     };
     let mut inner = shared.lock();
-    match ops::update(&inner.store, id, &update, explicit_write()) {
-        Ok(_) => after_write(shared, &mut inner, "update", id, 200),
-        Err(e) => e.into(),
+    let key = match check_key(shared, req) {
+        Ok(k) => k,
+        Err(r) => return r,
+    };
+    let before = inner.store.get(id).map(|e| e.ticket.clone());
+    if let Err(e) = ops::update(&inner.store, id, &update, explicit_write()) {
+        return e.into();
     }
+    let answer = after_write(shared, &mut inner, "update", id, 200, actor_of(req));
+    if let (Some(before), Some(after)) = (before, inner.store.get(id).map(|e| &e.ticket)) {
+        for (field, from, to) in requested_changes(&before, after, &update) {
+            audit_write(shared, req, "api.update", id, (field, &from, &to));
+        }
+    }
+    remember(shared, req, key, &answer);
+    answer
+}
+
+/// The fields `update` asked to change whose value differs between `before` and `after`,
+/// as `(field, old, new)` text.
+fn requested_changes(
+    before: &Ticket,
+    after: &Ticket,
+    update: &Update,
+) -> Vec<(&'static str, String, String)> {
+    let text = |v: &Option<String>| v.clone().unwrap_or_default();
+    let list = |v: &[String]| v.join(",");
+    let mut out = Vec::new();
+    let mut note = |asked: bool, field: &'static str, old: String, new: String| {
+        if asked && old != new {
+            out.push((field, old, new));
+        }
+    };
+    note(
+        update.title.is_some(),
+        "title",
+        before.title.clone(),
+        after.title.clone(),
+    );
+    note(
+        update.status.is_some(),
+        "status",
+        before.status.clone(),
+        after.status.clone(),
+    );
+    note(
+        update.priority.is_some(),
+        "priority",
+        text(&before.priority),
+        text(&after.priority),
+    );
+    note(
+        update.assignee.is_some(),
+        "assignee",
+        text(&before.assignee),
+        text(&after.assignee),
+    );
+    note(
+        update.due.is_some(),
+        "due",
+        text(&before.due),
+        text(&after.due),
+    );
+    note(
+        update.parent.is_some(),
+        "parent",
+        text(&before.parent),
+        text(&after.parent),
+    );
+    note(
+        update.tags.is_some(),
+        "tags",
+        list(&before.tags),
+        list(&after.tags),
+    );
+    note(
+        update.blocked_by.is_some(),
+        "blocked_by",
+        list(&before.blocked_by),
+        list(&after.blocked_by),
+    );
+    note(
+        update.related.is_some(),
+        "related",
+        list(&before.related),
+        list(&after.related),
+    );
+    out
 }
 
 /// Rescans (running the rules) and returns the ticket as it is now.
-fn after_write(shared: &Shared, inner: &mut Inner, reason: &str, id: &str, status: u16) -> Reply {
-    shared.rescan_locked(inner, reason);
+fn after_write(
+    shared: &Shared,
+    inner: &mut Inner,
+    reason: &str,
+    id: &str,
+    status: u16,
+    actor: &str,
+) -> Reply {
+    shared.rescan_locked_as(inner, reason, actor);
     match inner.store.get(id) {
         Some(e) => reply(status, ticket_json(&inner.store, e, true)),
         None => error(500, format!("ticket {id} not found after write")),
@@ -464,9 +711,23 @@ fn reassign_id(shared: &Shared, req: &Request, id: &str) -> Reply {
             shared.events.publish(
                 "ticket.id_reassigned",
                 json!({"old_id": done.old_id, "new_id": done.new_id,
-                       "path": done.path.display().to_string()}),
+                       "path": done.path.display().to_string(), "actor": actor_of(req)}),
             );
-            let mut reply = after_write(shared, &mut inner, "reassign-id", &done.new_id, 200);
+            audit_write(
+                shared,
+                req,
+                "api.reassign-id",
+                &done.new_id,
+                ("id", &done.old_id, &done.new_id),
+            );
+            let mut reply = after_write(
+                shared,
+                &mut inner,
+                "reassign-id",
+                &done.new_id,
+                200,
+                actor_of(req),
+            );
             if let Value::Object(map) = &mut reply.body {
                 map.insert("old_id".into(), json!(done.old_id));
             }

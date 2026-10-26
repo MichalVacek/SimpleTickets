@@ -341,6 +341,7 @@ fn apply_change(
             to: change.to.clone(),
             reason: change.reason.clone(),
             level: change.level.into(),
+            actor: crate::audit::RULE_ACTOR.into(),
         };
         log.append(&entry)
             .map_err(|e| (format!("audit log: {e}"), false))?;

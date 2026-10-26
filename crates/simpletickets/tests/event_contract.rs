@@ -86,6 +86,9 @@ fn every_event_has_the_envelope_and_its_documented_payload_keys() {
                 .map(String::as_str)
                 .collect();
             let mut want = keys.to_vec();
+            if e["data"]["source"] == "api" {
+                want.push("actor");
+            }
             have.sort_unstable();
             want.sort_unstable();
             assert_eq!(have, want, "payload of {kind}");

@@ -2,6 +2,7 @@
 
 use crate::api;
 use crate::events::{self, Events};
+use crate::idempotency;
 use crate::logger::Logger;
 use crate::supervisor::{self, Policy, Runtime};
 use crate::token;
@@ -17,7 +18,7 @@ use simpletickets_core::migration::{self, Journal, MigrationError};
 use simpletickets_core::plugin::{self, Source};
 use simpletickets_core::rules::{self, RunOptions};
 use simpletickets_core::state::{
-    audit_log_path, ensure_state_dir, is_within, token_path, STATE_DIR,
+    audit_log_path, ensure_state_dir, is_within, state_dir, token_path, STATE_DIR,
 };
 use simpletickets_core::store::Store;
 use simpletickets_core::VERSION;
@@ -63,6 +64,8 @@ pub struct Options {
     pub user_plugins_dir: Option<PathBuf>,
     /// Restart policy for service plugins.
     pub plugin_policy: Policy,
+    /// How long the answer to a write sent with an `Idempotency-Key` is remembered.
+    pub idempotency_ttl: Duration,
     pub logger: Arc<Logger>,
 }
 
@@ -82,6 +85,7 @@ impl Options {
             webhook_backoff: Backoff::default(),
             user_plugins_dir: plugin::user_plugins_dir(),
             plugin_policy: Policy::default(),
+            idempotency_ttl: idempotency::DEFAULT_TTL,
             logger: Arc::new(Logger::discard()),
         }
     }
@@ -130,6 +134,8 @@ pub struct Shared {
     pub plugin_dirs: Vec<(Source, PathBuf)>,
     /// Runtime state of the service plugins the supervisor manages.
     pub plugins: Mutex<BTreeMap<String, Runtime>>,
+    /// Answers to keyed writes, for retries.
+    pub idempotency: Mutex<idempotency::Store>,
     token: String,
     inner: Mutex<Inner>,
     scheduler: Mutex<Option<Sender<Message>>>,
@@ -192,6 +198,16 @@ impl Shared {
     }
 
     pub fn rescan_locked(&self, inner: &mut Inner, reason: &str) -> (Value, ScanOutcome) {
+        self.rescan_locked_as(inner, reason, "api")
+    }
+
+    /// Like [`Shared::rescan_locked`]; ticket events that report an API write carry `actor`.
+    pub fn rescan_locked_as(
+        &self,
+        inner: &mut Inner,
+        reason: &str,
+        actor: &str,
+    ) -> (Value, ScanOutcome) {
         let mut outcome = ScanOutcome::default();
         match Config::load_from_dir(&self.dir) {
             Ok(config) if config != inner.config => {
@@ -220,7 +236,13 @@ impl Shared {
             "scan"
         };
         for change in diff::diff(&inner.store, &store) {
-            self.events.publish(change.kind(), change.data(source));
+            let mut data = change.data(source);
+            if source == "api" {
+                if let Value::Object(map) = &mut data {
+                    map.insert("actor".into(), json!(actor));
+                }
+            }
+            self.events.publish(change.kind(), data);
         }
         let (store, report) = if self.rules_enabled() {
             rules::reconcile(store, Some(&self.audit), RunOptions::default())
@@ -407,6 +429,10 @@ pub fn start(options: Options) -> Result<Running, String> {
         stop: AtomicBool::new(false),
         plugin_dirs: plugin::search_dirs(&dir, options.user_plugins_dir.clone()),
         plugins: Mutex::new(BTreeMap::new()),
+        idempotency: Mutex::new(idempotency::Store::load(
+            state_dir(&dir).join("idempotency.jsonl"),
+            options.idempotency_ttl,
+        )),
         token,
         scheduler: Mutex::new(None),
         update: Mutex::new(None),

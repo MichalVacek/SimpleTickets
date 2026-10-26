@@ -1,4 +1,5 @@
-//! Append-only audit log of automatic changes, one JSON object per line.
+//! Append-only audit log of changes made by rules and through the API, one JSON object
+//! per line.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -17,7 +18,13 @@ pub struct AuditEntry {
     pub reason: String,
     /// `info` or `warn`, taken from the tag logging configuration.
     pub level: String,
+    /// Who made the change: `rule` for the rule engine, otherwise the actor named by the
+    /// caller of the API (`api` when it named none).
+    pub actor: String,
 }
+
+/// The actor recorded for changes made by the rule engine.
+pub const RULE_ACTOR: &str = "rule";
 
 #[derive(Debug, Clone)]
 pub struct AuditLog {
@@ -48,12 +55,22 @@ impl AuditLog {
 
     /// The last `limit` entries, oldest first. Unreadable lines are skipped.
     pub fn tail(&self, limit: usize) -> Vec<Value> {
+        self.query(None, None, limit)
+    }
+
+    /// The last `limit` entries of the given actor and ticket (each filter optional),
+    /// oldest first. Entries written before actors were recorded match no actor.
+    pub fn query(&self, actor: Option<&str>, id: Option<&str>, limit: usize) -> Vec<Value> {
         let Ok(text) = fs::read_to_string(&self.path) else {
             return Vec::new();
         };
         let mut entries: Vec<Value> = text
             .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| {
+                actor.map_or(true, |a| e["actor"].as_str() == Some(a))
+                    && id.map_or(true, |i| e["id"].as_str() == Some(i))
+            })
             .collect();
         let start = entries.len().saturating_sub(limit);
         entries.drain(..start);
@@ -75,6 +92,7 @@ mod tests {
             to: "in-progress".into(),
             reason: "r".into(),
             level: "info".into(),
+            actor: RULE_ACTOR.into(),
         }
     }
 
@@ -90,5 +108,20 @@ mod tests {
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0]["id"], "B");
         assert_eq!(tail[1]["to"], "in-progress");
+    }
+
+    #[test]
+    fn filters_by_actor_and_ticket() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::new(dir.path().join("audit.jsonl"));
+        for (id, actor) in [("A", "rule"), ("B", "plugin:x"), ("A", "plugin:x")] {
+            let mut e = entry(id);
+            e.actor = actor.into();
+            log.append(&e).unwrap();
+        }
+        assert_eq!(log.query(Some("plugin:x"), None, 10).len(), 2);
+        assert_eq!(log.query(Some("plugin:x"), Some("A"), 10).len(), 1);
+        assert_eq!(log.query(None, Some("A"), 1).len(), 1);
+        assert!(log.query(Some("nobody"), None, 10).is_empty());
     }
 }

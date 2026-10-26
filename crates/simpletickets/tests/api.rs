@@ -28,6 +28,7 @@ fn token_is_required_on_every_route() {
         ("POST", "/v1/migration"),
         ("GET", "/v1/events"),
         ("GET", "/v1/audit"),
+        ("GET", "/v1/plugins"),
         ("GET", "/v1/tombstones"),
         ("DELETE", "/v1/tombstones/ST-1"),
         ("GET", "/v1/nonexistent"),
@@ -140,7 +141,7 @@ fn create_update_and_filter() {
     assert!(wait_for(
         || api.get("/v1/tickets/ST-1").1["status"] == "in-progress"
     ));
-    assert_eq!(api.get("/v1/audit").1[0]["id"], "ST-1");
+    assert_eq!(api.get("/v1/audit?actor=rule").1[0]["id"], "ST-1");
 
     // Finishing the blocker unblocks the dependent.
     api.patch("/v1/tickets/ST-2", r#"{"status":"done","priority":"low"}"#);
@@ -860,7 +861,10 @@ fn review_status_and_finished_parent_policy_through_the_api() {
     let (_, parent) = api.get("/v1/tickets/ST-1");
     assert_eq!(parent["ready_for_review"], true);
     assert_eq!(parent["effective_category"], "in-progress");
-    assert_eq!(api.get("/v1/audit").1[0]["to"], "ready-for-review");
+    assert_eq!(
+        api.get("/v1/audit?actor=rule").1[0]["to"],
+        "ready-for-review"
+    );
 
     // Approving the review marks the parent done; then new work under it is refused.
     assert_eq!(api.patch("/v1/tickets/ST-1", r#"{"status":"done"}"#).0, 200);

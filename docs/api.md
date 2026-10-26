@@ -45,7 +45,33 @@ The message is for people and can change; clients branch on the status code.
 | 405 | Route exists, method does not |
 | 409 | Conflict: a write lost a race with a file change, or a config change needs a migration (the body then also has `plan`), or a migration is already running |
 | 413 | Body over 1 MiB |
+| 422 | An `Idempotency-Key` was already used for a different request |
 | 500 | The daemon could not write a file or state |
+
+## Actors
+
+A client performing writes names itself with the request header `X-SimpleTickets-Actor: <name>`. The name is 1 to 64 characters from letters, digits and `. _ : @ / -`; anything else is a `400` (on any route). Plugins started by the daemon find theirs in `SIMPLETICKETS_ACTOR`, which is `plugin:<name>`. The name is a label, not a credential: every holder of the token can use any name.
+
+The actor is recorded for:
+
+- every successful `POST /v1/tickets`, `PATCH /v1/tickets/{id}` and `POST /v1/tickets/{id}/reassign-id`, in the audit log: one entry for a create (`rule` `api.create`, `field` `ticket`, `to` the title), one per changed field for an update (`rule` `api.update`), and one for a reassign (`rule` `api.reassign-id`, `field` `id`). Only the fields the request asked to change are listed. Writes that name no actor are recorded as `api`; changes made by the rule engine as `rule`;
+- the ticket events caused by an API write: `ticket.created`, `ticket.updated`, `ticket.status_changed`, `ticket.moved`, `ticket.deleted` and `ticket.id_reassigned` carry `actor` in their payload when `source` is `api`. `source` itself keeps its meaning (`api`, `rule` or `scan`); `actor` tells who was behind an `api` write. Like `source`, it is best effort: a scan that finds several changes at once attributes all of its `api`-sourced events to the write that triggered the scan.
+
+`GET /v1/audit?actor=plugin:demo&id=ST-4&limit=20` returns the last 20 entries of that actor for that ticket. Entries written before actors were recorded have no `actor` and match no actor filter. Other writes (config, migration, tombstones) are not audited and carry no actor.
+
+## Idempotency
+
+`POST /v1/tickets` and `PATCH`/`PUT /v1/tickets/{id}` accept `Idempotency-Key: <key>`, 1 to 128 visible ASCII characters (anything else is a `400`), so a client that does not know whether a request arrived can send it again safely.
+
+- The first request with a key is carried out as usual. If it succeeds (`2xx`), the daemon stores the status and body of its answer.
+- A repeat with the same key, the same actor, the same method and path and an equal JSON body gets the stored answer again, with the response header `Idempotent-Replayed: true`, and changes nothing. The body is compared as JSON, so whitespace and key order do not matter. The stored answer is a snapshot: it is not refreshed when the ticket changed since.
+- The same key and actor on a different request is `422`.
+- Keys are scoped by actor, so two plugins can use the same key text.
+- Failed requests (`4xx`, `5xx`) are not stored, so the client can correct the request and reuse the key.
+- Two concurrent requests with one key are serialized: one is carried out, the other gets its answer.
+- Answers are kept for 24 hours, at most 10 000 of them (oldest forgotten first), in `.simpletickets/idempotency.jsonl`, so they survive a daemon restart. After that time the key is free again.
+
+A key should identify the intended effect, not the attempt: `follow-up:ST-12` for "create the follow-up of ST-12". Updates are not conditional: an update retried after someone else changed the ticket gets the stored answer and is not applied again, which is the point.
 
 ## Ticket object
 
@@ -78,8 +104,8 @@ Search results add `score` (number), `match_field` (`title` or `body`) and `snip
 | `GET /v1/tickets` | query: `status`, `category`, `priority`, `assignee`, `tag`, `parent`, `title`, `blocked`, `due_by`, `field.<key>`, `limit`; with `q` it behaves as search | list of ticket objects |
 | `GET /v1/search` | query: `q` (required) plus the list filters and `limit` | list of search results, best first |
 | `GET /v1/tickets/{id}` | | ticket object with `body`; `404` for an unknown ID |
-| `POST /v1/tickets` | `{title, status?, priority?, assignee?, due?, tags?, parent?, blocked_by?, related?, template?, body?, role?}`; `role` is `parent` or `sub` | `201`, ticket object with `body` |
-| `PATCH /v1/tickets/{id}` (also `PUT`) | any of `title, status, priority, assignee, due, parent, tags, blocked_by, related`; `null` clears `priority`, `assignee`, `due`, `parent` | `200`, ticket object with `body` |
+| `POST /v1/tickets` (optional `Idempotency-Key`) | `{title, status?, priority?, assignee?, due?, tags?, parent?, blocked_by?, related?, template?, body?, role?}`; `role` is `parent` or `sub` | `201`, ticket object with `body` |
+| `PATCH /v1/tickets/{id}` (also `PUT`; optional `Idempotency-Key`) | any of `title, status, priority, assignee, due, parent, tags, blocked_by, related`; `null` clears `priority`, `assignee`, `due`, `parent` | `200`, ticket object with `body` |
 | `POST /v1/tickets/{id}/reassign-id` | optional `{path}` naming the copy | ticket object plus `old_id` |
 | `POST /v1/rescan` | | `{reason, tickets, problems, rules, rules_enabled}`; scans and runs the rules |
 | `GET /v1/doctor` | | `{clean, issues: [string], tombstones, warnings}` |
@@ -91,7 +117,7 @@ Search results add `score` (number), `match_field` (`title` or `body`) and `snip
 | `GET /v1/migration` | | `{journal}`, null when there never was one |
 | `POST /v1/migration/resume` | | `{journal}`; `404` when nothing is unfinished |
 | `GET /v1/events` | query: `since`, `wait`, `stream` | an [event page](#polling) |
-| `GET /v1/audit` | query: `limit` (default 100) | list of `{ts, rule, id, field, from, to, reason, level}`, oldest first |
+| `GET /v1/audit` | query: `actor`, `id`, `limit` (default 100) | list of `{ts, rule, id, field, from, to, reason, level, actor}`, oldest first; with filters, the last `limit` matching entries |
 | `GET /v1/plugins` | | list of [plugin](#plugins) objects |
 | `GET /v1/templates` | | list of template names |
 
@@ -190,16 +216,18 @@ A client that has no cursor yet calls `GET /v1/events` with no parameters and us
 
 Payload fields are listed per type. `source` is `api` (a write made through this API), `rule` (a status written by an automatic rule) or `scan` (anything found by a scan: a command line write, a hand edit, a sync tool). It is best effort: a hand edit that lands in the same instant as an API write is reported as `api`.
 
+On the ticket events `actor` is present only when `source` is `api` (see [Actors](#actors)); `ticket.id_reassigned`, which has no `source`, always carries it.
+
 Ticket events are produced by comparing the ticket index before and after every scan, so they fire the same way for API writes, rule writes, command line writes and hand edits. A ticket is identified by its ID: the same ID at another path is a move.
 
 | Type | Payload |
 |---|---|
-| `ticket.created` | `id`, `title`, `status`, `path`, `source` |
-| `ticket.updated` | `id`, `title`, `path`, `changes`, `body_changed`, `source`; `changes` maps each changed field (`title`, `status`, `priority`, `assignee`, `due`, `tags`, `parent`, `blocked_by`, `related`, `extra`) to `{"from": ..., "to": ...}`, with `null` for an absent value; `body_changed` is true when the Markdown body differs |
-| `ticket.status_changed` | `id`, `title`, `path`, `from`, `to`, `from_category`, `to_category`, `source`; sent after the `ticket.updated` of the same change |
-| `ticket.moved` | `id`, `title`, `path` (the new one), `from`, `to`, `source` |
-| `ticket.deleted` | `id`, `title`, `path` (the last known), `source`. A deleted ID stays known as a tombstone while it is referenced |
-| `ticket.id_reassigned` | `old_id`, `new_id`, `path` |
+| `ticket.created` | `id`, `title`, `status`, `path`, `source`, `actor` |
+| `ticket.updated` | `id`, `title`, `path`, `changes`, `body_changed`, `source`, `actor`; `changes` maps each changed field (`title`, `status`, `priority`, `assignee`, `due`, `tags`, `parent`, `blocked_by`, `related`, `extra`) to `{"from": ..., "to": ...}`, with `null` for an absent value; `body_changed` is true when the Markdown body differs |
+| `ticket.status_changed` | `id`, `title`, `path`, `from`, `to`, `from_category`, `to_category`, `source`, `actor`; sent after the `ticket.updated` of the same change |
+| `ticket.moved` | `id`, `title`, `path` (the new one), `from`, `to`, `source`, `actor` |
+| `ticket.deleted` | `id`, `title`, `path` (the last known), `source`, `actor`. A deleted ID stays known as a tombstone while it is referenced |
+| `ticket.id_reassigned` | `old_id`, `new_id`, `path`, `actor` |
 | `rule.applied` | `rule`, `id`, `path`, `from`, `to`, `reason`, `level` (`info` or `warn`); a rule rewrote a ticket's status. It is followed by the matching `ticket.updated` and `ticket.status_changed` with `source` `rule` |
 | `warning.raised` | `rule`, `id`, `message`, `kind` (`condition` or `event`), `first_seen` |
 | `tombstone.forgotten` | `id` |
