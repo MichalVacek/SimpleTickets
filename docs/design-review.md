@@ -7,7 +7,7 @@ Defaults below are recommendations, not decisions. Decisions live in [spec.md](s
 1. Files are the only source of truth; any index is a rebuildable cache. (Default: yes, SQLite cache rebuilt on startup.)
 2. May the daemon write into files that humans, editors and git also own? (Default: only frontmatter keys it owns, atomic writes, never the body.)
 3. Parent specs in git repos: what happens on branch switch, rebase, revert? (Default: do not store parent in-progress/done in the spec; derive from sub-tickets.)
-4. Main writer: human, agent, or API? (Default: assume agents and humans both write files directly.)
+4. Main writer: human, script, or API? (Default: assume scripts and humans both write files directly.)
 5. Rules fire on events or by reconciliation? (Default: idempotent reconcilers over full state each scan.)
 6. Is "blocked" stored or derived? (Default: derived, never written.)
 7. What counts as "work starts" and "done"; do cancelled tickets unblock? (Default: status categories todo / in-progress / done / cancelled.)
@@ -46,12 +46,12 @@ Defaults below are recommendations, not decisions. Decisions live in [spec.md](s
 
 | Capability | Where | Reason |
 |---|---|---|
-| CLI (create, list, show, set status, doctor) | core | Scripts, agents, debugging. |
+| CLI (create, list, show, set status, doctor) | core | Scripts, debugging. |
 | Lint/doctor | core | Hand-edited files drift. |
 | Full-text search | core | Index exists already. |
 | Templates | core | Create needs default body and frontmatter. |
 | Labels/tags | core | Trivial field, heavily filtered. |
-| Assignee | core | Agents need an owner field. |
+| Assignee | core | Tickets need an owner field. |
 | Audit log of daemon changes | core | Explain automatic status changes. |
 | Event stream / webhooks | core | Plugins need notifications. |
 | Dry-run for rules and migration | core | Trust before rewriting files. |

@@ -13,7 +13,7 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 - Note tools have no automation, and a global vault for files spread across many repos and projects gets messy.
 - Local-first tickets that can be synced to a hosted tracker when needed, so someone else can pick up the work.
 - A Kanban board in a UI to see what is in progress.
-- An MCP server lets an agent pick the next thing to work on. Tickets are not only code: "Create reporting, deadline Thursday" gets picked up because its deadline is today.
+- An MCP server lets automation pick the next thing to work on. Tickets are not only code: "Create reporting, deadline Thursday" gets picked up because its deadline is today.
 - Long-term: automated workflows with visible tracking.
 
 ## Core (build now)
@@ -62,7 +62,7 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 
 ## Decisions
 
-- Audience: personal agent-driven workflow first; open source stays the goal.
+- Audience: personal automated workflow first; open source stays the goal.
 - Core stays minimal; everything else is a plugin. "Next ticket" is a plugin (custom filter + order + first item), not core. Core must be prepared for a future workflow-automation plugin.
 - Plugins are out-of-process (local API + event stream) in v0.1. In-process hooks come later, only when a real plugin needs them.
 - Statuses: custom names mapped to four categories (todo, in-progress, done, cancelled). Rules act on categories. "Blocked" is derived from open blockers, never stored.
@@ -79,7 +79,7 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 - Links: IDs in frontmatter (`parent`, `blocked_by`, `related`). Reverse links derived. Wikilinks in the body are optional display only.
 - Bad state (deleted ticket, duplicate ID, malformed frontmatter, cycles): never guess, report through a doctor endpoint. Unparseable files are skipped and never rewritten.
 - v0.1 platform: native binary on Mac first, Docker second.
-- v0.1 done: core plus a minimal MCP plugin so an agent can list and update tickets end to end.
+- v0.1 done: core plus a minimal MCP plugin so a client can list and update tickets end to end.
 - Language: Rust.
 
 ## Open questions
