@@ -1,6 +1,7 @@
 //! The background process: shared state, scheduled scans, file watching and the HTTP server.
 
 use crate::api;
+use crate::logger::{self, Level, Logger};
 use crate::token;
 use crate::update::{self, Release, UpdateCheck};
 use notify::{PollWatcher, RecursiveMode, Watcher};
@@ -51,6 +52,7 @@ pub struct Options {
     pub update_check: Option<UpdateCheck>,
     /// Heartbeat age after which another daemon may take over this folder's lease.
     pub lease_ttl: Duration,
+    pub logger: Arc<Logger>,
 }
 
 impl Options {
@@ -65,6 +67,7 @@ impl Options {
             poll_interval: None,
             update_check: None,
             lease_ttl: lease::DEFAULT_TTL,
+            logger: Arc::new(Logger::discard()),
         }
     }
 }
@@ -73,17 +76,65 @@ impl Options {
 pub struct Events {
     log: Mutex<(u64, VecDeque<Value>)>,
     changed: Condvar,
+    logger: Arc<Logger>,
+}
+
+/// The log level and message line for an event. Rule applications use the level the
+/// rule engine chose from the ticket's tags (`tag_logging`).
+fn log_entry(kind: &str, data: &Value) -> (Level, String) {
+    let text = |key: &str| {
+        data.get(key)
+            .map(|v| v.as_str().map_or_else(|| v.to_string(), str::to_string))
+    };
+    let keys: &[&str] = match kind {
+        "rule.applied" => &["rule", "id", "from", "to", "reason"],
+        "scan" => &["reason", "tickets", "problems"],
+        "root.offline" => &["root", "message", "frozen"],
+        "root.online" => &["root"],
+        "lease.lost" | "state.error" | "config.invalid" | "migration.error" => &["message"],
+        "migration.started" | "migration.suggested" => &["steps", "conflicts", "actions"],
+        "migration.finished" => &["state", "steps", "conflicts"],
+        "update.available" => &["current", "latest", "url"],
+        "warning.raised" => &["id", "rule", "message"],
+        "ticket.created" | "ticket.updated" | "tombstone.forgotten" => &["id"],
+        _ => &[],
+    };
+    let pairs: Vec<(&str, String)> = keys
+        .iter()
+        .filter_map(|k| text(k).map(|v| (*k, v)))
+        .collect();
+    let level = match kind {
+        "state.error" | "config.invalid" | "migration.error" => Level::Error,
+        "root.offline" | "lease.lost" | "warning.raised" => Level::Warn,
+        "rule.applied" => match data.get("level").and_then(Value::as_str) {
+            Some("warn") => Level::Warn,
+            _ => Level::Info,
+        },
+        "scan" if data.get("reason").and_then(Value::as_str) == Some("startup") => Level::Info,
+        "scan" | "ticket.created" | "ticket.updated" => Level::Debug,
+        _ => Level::Info,
+    };
+    let fields = logger::fields(&pairs);
+    let line = if fields.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind} {fields}")
+    };
+    (level, line)
 }
 
 impl Events {
-    fn new() -> Events {
+    fn new(logger: Arc<Logger>) -> Events {
         Events {
             log: Mutex::new((1, VecDeque::new())),
             changed: Condvar::new(),
+            logger,
         }
     }
 
     pub fn publish(&self, kind: &str, data: Value) {
+        let (level, line) = log_entry(kind, &data);
+        self.logger.log(level, &line);
         let mut guard = self.log.lock().unwrap_or_else(|e| e.into_inner());
         let seq = guard.0;
         guard.0 += 1;
@@ -136,6 +187,7 @@ pub struct Inner {
 /// State shared between the API workers and the scheduler.
 pub struct Shared {
     pub dir: PathBuf,
+    pub logger: Arc<Logger>,
     pub events: Events,
     pub audit: AuditLog,
     pub stop: AtomicBool,
@@ -339,13 +391,18 @@ impl Running {
         &self.token_file
     }
 
+    /// Stops the scheduler and workers, waits for them, releases the lease and flushes the log.
     pub fn stop(self) {
+        let logger = self.shared.logger.clone();
+        logger.info("stopping: draining workers");
         self.shared.stop.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Message::Stop);
         for t in self.threads {
             let _ = t.join();
         }
         self.shared.release_lease();
+        logger.info("stopped: lease released");
+        logger.flush();
     }
 
     /// Blocks until the daemon is stopped.
@@ -361,8 +418,16 @@ pub fn start(options: Options) -> Result<Running, String> {
         .dir
         .canonicalize()
         .map_err(|e| format!("{}: {e}", options.dir.display()))?;
+    let logger = options.logger.clone();
     ensure_state_dir(&dir).map_err(|e| format!("cannot create state folder: {e}"))?;
-    let lease = Lease::acquire(&dir, options.lease_ttl).map_err(|e| e.to_string())?;
+    let lease = Lease::acquire(&dir, options.lease_ttl).map_err(|e| {
+        logger.error(&format!("cannot take the folder lease: {e}"));
+        e.to_string()
+    })?;
+    logger.info(&format!(
+        "starting version={VERSION} dir={} lease=acquired",
+        dir.display()
+    ));
     let resumed = migration::resume(&dir, migration::RunOptions::default());
     let config = Config::load_from_dir(&dir).map_err(|e| e.to_string())?;
     let token_file = options
@@ -374,7 +439,8 @@ pub fn start(options: Options) -> Result<Running, String> {
 
     let shared = Arc::new(Shared {
         dir: dir.clone(),
-        events: Events::new(),
+        logger: logger.clone(),
+        events: Events::new(logger.clone()),
         audit: AuditLog::new(audit_log_path(&dir)),
         stop: AtomicBool::new(false),
         token,
@@ -435,6 +501,7 @@ pub fn start(options: Options) -> Result<Running, String> {
         let shared = shared.clone();
         threads.push(thread::spawn(move || run_update_checks(&shared, &check)));
     }
+    logger.info(&format!("listening addr={addr}"));
     Ok(Running {
         addr,
         shared,
@@ -478,7 +545,11 @@ fn keep_lease(shared: &Shared, ttl: Duration) {
 /// Checks at startup and then every interval until the daemon stops.
 fn run_update_checks(shared: &Shared, check: &UpdateCheck) {
     while !shared.stop.load(Ordering::Relaxed) {
-        if let Some(release) = update::check_once(check.fetcher.as_ref(), VERSION) {
+        let found = update::check_once(check.fetcher.as_ref(), VERSION);
+        shared
+            .logger
+            .debug(&format!("update check newer_release={}", found.is_some()));
+        if let Some(release) = found {
             let mut slot = shared.update.lock().unwrap_or_else(|e| e.into_inner());
             if slot.as_ref() != Some(&release) {
                 shared.events.publish(
@@ -598,7 +669,7 @@ mod tests {
 
     #[test]
     fn events_are_sequenced_and_blocking() {
-        let events = Events::new();
+        let events = Events::new(Arc::new(Logger::discard()));
         let stop = AtomicBool::new(false);
         let (none, next) = events.since(0, Duration::ZERO, &stop);
         assert!(none.is_empty());

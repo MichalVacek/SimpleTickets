@@ -3,5 +3,6 @@
 pub mod api;
 pub mod cli;
 pub mod daemon;
+pub mod logger;
 pub mod token;
 pub mod update;

@@ -1,5 +1,6 @@
 //! Command line interface.
 
+use crate::logger::{self, Level, Logger};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
@@ -17,6 +18,7 @@ use simpletickets_core::view::{doctor_json, hit_json, ticket_json};
 use simpletickets_core::write::WriteOptions;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -142,6 +144,12 @@ pub struct DaemonArgs {
     /// Hours between update checks
     #[arg(long, default_value_t = 24)]
     pub update_interval_hours: u64,
+    /// Log level: error, warn, info or debug (default: $SIMPLETICKETS_LOG_LEVEL or info)
+    #[arg(long)]
+    pub log_level: Option<String>,
+    /// Append logs to this file instead of stderr (default: $SIMPLETICKETS_LOG_FILE)
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -425,6 +433,7 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
                 check.interval = Duration::from_secs(args.update_interval_hours.max(1) * 3600);
                 options.update_check = Some(check);
             }
+            options.logger = Arc::new(make_logger(args.log_level, args.log_file)?);
             let running = crate::daemon::start(options)?;
             println!("listening on http://{}/v1", running.addr);
             println!("token file: {}", running.token_file().display());
@@ -455,6 +464,26 @@ fn assign(ctx: &Context, id: &str, assignee: Option<String>) -> Result<ExitCode,
         println!("{id} is already assigned to {who}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Builds the daemon logger from the flags, falling back to the environment.
+fn make_logger(level: Option<String>, file: Option<PathBuf>) -> Result<Logger, String> {
+    let level = match level.or_else(|| std::env::var(logger::LEVEL_ENV).ok()) {
+        Some(text) => Level::parse(&text)
+            .ok_or_else(|| format!("unknown log level {text:?} (error, warn, info, debug)"))?,
+        None => Level::Info,
+    };
+    let file = file.or_else(|| {
+        std::env::var_os(logger::FILE_ENV)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    });
+    match file {
+        Some(path) => {
+            Logger::file(level, &path).map_err(|e| format!("log file {}: {e}", path.display()))
+        }
+        None => Ok(Logger::stderr(level)),
+    }
 }
 
 fn create(ctx: &Context, args: CreateArgs) -> Result<ExitCode, String> {

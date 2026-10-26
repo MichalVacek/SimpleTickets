@@ -122,7 +122,9 @@ The container runs `simpletickets --dir /data daemon --bind-all --poll`. Bind mo
 simpletickets daemon --port 7878 --scan-interval 60
 ```
 
-Other flags: `--no-watch` (periodic scans only), `--poll` (see Docker), `--token-file`, `--no-update-check`.
+Other flags: `--no-watch` (periodic scans only), `--poll` (see Docker), `--token-file`, `--no-update-check`, `--log-level`, `--log-file`.
+
+Logging: one line per entry, `<UTC time> <LEVEL> <message> key=value ...`, on stderr or appended to `--log-file`. `--log-level` is `error`, `warn`, `info` (default) or `debug`; `SIMPLETICKETS_LOG_LEVEL` and `SIMPLETICKETS_LOG_FILE` supply defaults that the flags override. The daemon logs startup and shutdown, scans (`debug`, except the startup scan), applied rules, rule warnings, errors, roots going offline or online, lease changes, migrations and update checks. A rule application is logged at `warn` when the ticket carries a tag configured as `warn` in `tag_logging`, otherwise at `info`. The API token is never logged.
 
 Events published besides the scan and rule events: `root.offline`, `root.online`, `warning.raised`, `tombstone.forgotten`, `ticket.id_reassigned`, `lease.lost`, `lease.acquired`, `state.error`.
 
