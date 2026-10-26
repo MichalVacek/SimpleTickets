@@ -14,6 +14,11 @@ use std::io::Read;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+/// The version of the HTTP API and event contract; the `/v1` routes implement version 1.
+pub const API_VERSION: u32 = 1;
+/// Response header carrying [`API_VERSION`].
+pub const API_VERSION_HEADER: &str = "X-SimpleTickets-Api-Version";
+
 const MAX_BODY: u64 = 1024 * 1024;
 const MAX_WAIT_SECONDS: u64 = 30;
 
@@ -66,9 +71,12 @@ pub fn serve(server: &tiny_http::Server, shared: &Shared) {
         let body = serde_json::to_vec(&result.body).unwrap_or_default();
         let header = tiny_http::Header::from_bytes("Content-Type", "application/json")
             .expect("static header");
+        let version = tiny_http::Header::from_bytes(API_VERSION_HEADER, API_VERSION.to_string())
+            .expect("static header");
         let mut response = tiny_http::Response::from_data(body)
             .with_status_code(result.status)
-            .with_header(header);
+            .with_header(header)
+            .with_header(version);
         if result.status == 401 {
             let challenge =
                 tiny_http::Header::from_bytes("WWW-Authenticate", "Bearer").expect("static header");
@@ -184,6 +192,7 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
             reply(
                 200,
                 json!({
+                    "api_version": API_VERSION,
                     "version": simpletickets_core::VERSION,
                     "status": if offline.is_empty() { "ok" } else { "degraded" },
                     "tickets": inner.store.tickets().count(),
@@ -253,7 +262,7 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
             | ["v1", "tickets", _, "reassign-id"],
             _,
         ) => error(405, "method not allowed"),
-        _ => error(404, "not found"),
+        _ => error(404, format!("no such route: {} {}", req.method, req.path)),
     }
 }
 

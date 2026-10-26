@@ -9,6 +9,17 @@ The daemon serves a JSON API under `/v1` on `127.0.0.1` (default port 7878). Thi
 - Timestamps in events are UTC, `YYYY-MM-DDTHH:MM:SSZ`.
 - Ticket IDs are opaque strings such as `ST-12`. Paths in responses are absolute file system paths in the host's own notation.
 
+## Versioning and compatibility
+
+The API version is an integer, currently `1`, and it is the number in the path: every route lives under `/v1`. The same version covers the event stream and the webhook payloads.
+
+- `GET /v1/health` returns `api_version` (integer) and `version` (the daemon's release, for example `0.1.0`). `api_version` changes only when a new path prefix is introduced; `version` changes with every release.
+- Every response, errors included, carries the header `X-SimpleTickets-Api-Version: 1`, so a client can check it without calling `/v1/health`.
+- Within `v1` changes are additive only: new routes, new optional request fields, new response fields, new event types, new event payload fields, new query parameters. Clients must ignore response and payload fields and event types they do not know. Existing fields, routes, status codes for existing situations and the event envelope keep their meaning and shape.
+- A breaking change (removing or renaming a field, route or event type, changing a type or meaning, tightening validation of accepted input) is made only in a new version served under `/v2`. When `/v2` ships, `/v1` stays available and unchanged for at least 12 months, and both versions run side by side in the same daemon. The deprecation is announced in the release notes before `/v1` is removed.
+- A bug fix that makes the daemon match this document is not a breaking change.
+- Routes that do not exist, including any `/v2` route on a daemon that does not serve it, return a JSON `404` (`{"error": "no such route: GET /v2/health"}`) once the token is valid. Without a valid token every route answers `401`, so a client can detect an unsupported version only with a token.
+
 ## Authentication
 
 Every route requires `Authorization: Bearer <token>`. The token is generated on first start and stored in `.simpletickets/token` in the tickets folder (owner-only permissions; `--token-file` overrides the location). Requests whose `Host` header is not `127.0.0.1`, `localhost` or `::1` are refused with `403`, which blocks DNS-rebinding from a browser.
@@ -62,7 +73,7 @@ Search results add `score` (number), `match_field` (`title` or `body`) and `snip
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /v1/health` | | `{version, status, tickets, frozen, rules_enabled, offline_roots: [{root, message}], update}`; `status` is `ok` or `degraded` while a root is offline; `update` is `null` or `{latest, url}` |
+| `GET /v1/health` | | `{api_version, version, status, tickets, frozen, rules_enabled, offline_roots: [{root, message}], update}`; `status` is `ok` or `degraded` while a root is offline; `update` is `null` or `{latest, url}` |
 | `GET /v1/parents` | | list of ticket objects |
 | `GET /v1/tickets` | query: `status`, `category`, `priority`, `assignee`, `tag`, `parent`, `title`, `blocked`, `due_by`, `field.<key>`, `limit`; with `q` it behaves as search | list of ticket objects |
 | `GET /v1/search` | query: `q` (required) plus the list filters and `limit` | list of search results, best first |

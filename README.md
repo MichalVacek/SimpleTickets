@@ -130,11 +130,11 @@ Shutdown: on SIGINT or SIGTERM (and SIGHUP on unix; Ctrl-C, Ctrl-Break or closin
 
 Events: `ticket.created`, `ticket.updated`, `ticket.status_changed`, `ticket.moved`, `ticket.deleted` (for every change to a ticket, whether made through the API, a rule, the command line or by hand), plus `scan`, `rule.applied`, `root.offline`, `root.online`, `warning.raised`, `tombstone.forgotten`, `ticket.id_reassigned`, `lease.lost`, `lease.acquired`, `state.error` and others. The full contract (envelope, payloads, gap detection, delivery guarantees) is in [docs/api.md](docs/api.md).
 
-The daemon scans all folders on startup, watches them for changes, rescans periodically and runs the rules after each scan. The API listens on `127.0.0.1` only and requires `Authorization: Bearer <token>`. The token is generated on first run and stored in `.simpletickets/token` (owner-only permissions; `--token-file` overrides the location). Requests whose `Host` is not a localhost name are refused.
+The daemon scans all folders on startup, watches them for changes, rescans periodically and runs the rules after each scan. Every response carries `X-SimpleTickets-Api-Version`; within `v1` changes are additive only (see [docs/api.md](docs/api.md#versioning-and-compatibility)). The API listens on `127.0.0.1` only and requires `Authorization: Bearer <token>`. The token is generated on first run and stored in `.simpletickets/token` (owner-only permissions; `--token-file` overrides the location). Requests whose `Host` is not a localhost name are refused.
 
 | Route | Purpose |
 |---|---|
-| `GET /v1/health` | version, `status` (`ok` or `degraded` while a root is offline), ticket and frozen counts, `offline_roots`, `rules_enabled` and `update` (`null`, or the newer release found by the update check) |
+| `GET /v1/health` | `api_version` (integer, 1), `version`, `status` (`ok` or `degraded` while a root is offline), ticket and frozen counts, `offline_roots`, `rules_enabled` and `update` (`null`, or the newer release found by the update check) |
 | `GET /v1/parents` | parent tickets |
 | `GET /v1/tickets?status=&category=&priority=&assignee=&tag=&parent=&title=&blocked=&due_by=&field.<key>=&limit=` | list and filter |
 | `GET /v1/search?q=&limit=&<filters>` | full-text search; the same filters as the list, results carry `score`, `match_field` and `snippet`; `q` on `GET /v1/tickets` does the same |
