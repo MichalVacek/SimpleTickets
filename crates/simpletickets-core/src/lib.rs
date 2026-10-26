@@ -6,11 +6,15 @@ pub mod doctor;
 pub mod frontmatter;
 pub mod hash;
 pub mod id;
+pub mod ops;
+pub mod query;
 pub mod rules;
 pub mod state;
 pub mod store;
+pub mod templates;
 pub mod ticket;
 pub mod time;
+pub mod view;
 pub mod write;
 
 /// Crate version, as declared in the manifest.

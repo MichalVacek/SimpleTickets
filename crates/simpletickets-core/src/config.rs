@@ -26,6 +26,11 @@ impl Category {
         Category::Cancelled,
     ];
 
+    /// The category with the given key (`todo`, `in-progress`, `done`, `cancelled`).
+    pub fn from_key(key: &str) -> Option<Category> {
+        Category::ALL.into_iter().find(|c| c.key() == key)
+    }
+
     pub fn key(self) -> &'static str {
         match self {
             Category::Todo => "todo",
@@ -224,6 +229,48 @@ impl Config {
     /// The category of a status name, compared case-insensitively.
     pub fn category_of(&self, status: &str) -> Option<Category> {
         self.statuses.get(&status.trim().to_lowercase()).copied()
+    }
+
+    /// All configured status names with their categories.
+    pub fn statuses(&self) -> &BTreeMap<String, Category> {
+        &self.statuses
+    }
+
+    /// The configuration as JSON, with paths as strings.
+    pub fn to_json(&self) -> serde_json::Value {
+        let paths = |ps: &[PathBuf]| -> Vec<String> {
+            ps.iter().map(|p| p.display().to_string()).collect()
+        };
+        let statuses: BTreeMap<&str, Vec<&str>> = Category::ALL
+            .into_iter()
+            .map(|c| (c.key(), self.statuses_in(c)))
+            .collect();
+        let tag_logging: BTreeMap<&String, &str> = self
+            .tag_logging
+            .iter()
+            .map(|(t, l)| {
+                (
+                    t,
+                    match l {
+                        LogLevel::Info => "info",
+                        LogLevel::Warn => "warn",
+                    },
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "id_prefix": self.id_prefix,
+            "roots": self.roots.iter().map(|r| serde_json::json!({
+                "path": r.path.display().to_string(),
+                "kind": match r.kind { RootKind::Tickets => "tickets", RootKind::Repo => "repo" },
+            })).collect::<Vec<_>>(),
+            "auto_scan": paths(&self.auto_scan),
+            "parent_folder": self.parent_folder.as_ref().map(|p| p.display().to_string()),
+            "subticket_folder": self.subticket_folder.as_ref().map(|p| p.display().to_string()),
+            "statuses": statuses,
+            "tag_logging": tag_logging,
+            "cancelled_unblocks": self.cancelled_unblocks,
+        })
     }
 
     /// Status names configured for a category, sorted.

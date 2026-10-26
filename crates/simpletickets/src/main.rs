@@ -1,3 +1,3 @@
-fn main() {
-    println!("simpletickets {}", simpletickets_core::VERSION);
+fn main() -> std::process::ExitCode {
+    simpletickets::cli::main()
 }

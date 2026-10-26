@@ -1,0 +1,6 @@
+id_prefix: ST
+parent_folder: specs
+subticket_folder: work
+tag_logging:
+  urgent: warn
+cancelled_unblocks: true
