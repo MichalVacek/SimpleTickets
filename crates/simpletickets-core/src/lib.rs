@@ -1,5 +1,9 @@
 //! Core library for SimpleTickets: ticket model, configuration and store.
 
+pub mod frontmatter;
+pub mod id;
+pub mod ticket;
+
 /// Crate version, as declared in the manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
