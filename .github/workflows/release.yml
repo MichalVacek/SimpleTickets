@@ -36,7 +36,9 @@ jobs:
           name="simpletickets-${{ matrix.target }}"
           mkdir -p dist
           cp target/${{ matrix.target }}/release/simpletickets target/${{ matrix.target }}/release/simpletickets-mcp dist/
-          tar -czf "$name.tar.gz" -C dist simpletickets simpletickets-mcp
+          mkdir -p dist/plugins/mcp
+          cp plugins/mcp/plugin.yml dist/plugins/mcp/
+          tar -czf "$name.tar.gz" -C dist simpletickets simpletickets-mcp plugins
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh

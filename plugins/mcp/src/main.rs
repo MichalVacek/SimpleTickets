@@ -11,7 +11,7 @@ const USAGE: &str = "simpletickets-mcp [--url URL] [--token-file PATH | --token 
 Speaks MCP over stdio and forwards tool calls to the SimpleTickets daemon.
 
   --url URL          daemon address (default: $SIMPLETICKETS_URL or http://127.0.0.1:7878)
-  --token-file PATH  file holding the API token
+  --token-file PATH  file holding the API token (also $SIMPLETICKETS_TOKEN_FILE)
   --token TOKEN      the API token (also $SIMPLETICKETS_TOKEN)
   --dir DIR          tickets folder; its .simpletickets/token is used when no token is given
                      (default: $SIMPLETICKETS_DIR or the current folder)";
@@ -53,7 +53,10 @@ fn build_backend(args: Args) -> Result<HttpBackend, String> {
     let token = match args.token.or_else(|| env("SIMPLETICKETS_TOKEN")) {
         Some(t) => t,
         None => {
-            let file = args.token_file.unwrap_or_else(|| {
+            let file = args
+                .token_file
+                .or_else(|| env("SIMPLETICKETS_TOKEN_FILE").map(PathBuf::from));
+            let file = file.unwrap_or_else(|| {
                 let dir = args
                     .dir
                     .or_else(|| env("SIMPLETICKETS_DIR").map(PathBuf::from))

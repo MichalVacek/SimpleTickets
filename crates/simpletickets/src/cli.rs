@@ -82,6 +82,11 @@ pub enum Command {
     Templates,
     /// Run the background daemon with the local API
     Daemon(DaemonArgs),
+    /// List, enable, disable and check plugins
+    Plugins {
+        #[command(subcommand)]
+        command: crate::plugins::PluginsCommand,
+    },
     /// Move tickets and rewrite statuses for a new configuration
     Migrate {
         #[command(subcommand)]
@@ -453,6 +458,12 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             running.stop();
             Ok(ExitCode::SUCCESS)
         }
+        Command::Plugins { command } => crate::plugins::run(
+            &ctx.dir,
+            &ctx.config,
+            command,
+            simpletickets_core::plugin::user_plugins_dir(),
+        ),
         Command::Migrate { command } => migrate(&ctx, command),
         Command::Templates => {
             for name in templates::list(&ctx.dir) {

@@ -8,11 +8,56 @@ REPO="MichalVacek/SimpleTickets"
 LABEL="com.simpletickets.daemon"
 UNIT="simpletickets.service"
 
-# Addons: name|crate|binary|description. Add a line to offer another addon; the
-# crate is built from source or its binary is taken from the release archive.
-ADDONS=(
-  "mcp|simpletickets-mcp|simpletickets-mcp|MCP server so a client can list, create and update tickets"
-)
+TMP_DIR=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Addons come from the plugin manifests in this checkout (plugins/*/plugin.yml): every
+# manifest with an `install:` block is offered. Each entry is
+# name|package|binary|description|manifest. Without a checkout (the script run on its
+# own) the built-in entry below is used and manifests come from the release archive.
+ADDONS=()
+
+# Prints name|package|binary|description for a manifest, from its top-level scalars and
+# its install block; prints nothing when the manifest has no install block.
+manifest_addon() {
+  awk '
+    function value(line,   v) {
+      v = line
+      sub(/^[^:]*:[ \t]*/, "", v)
+      sub(/[ \t]+$/, "", v)
+      gsub(/^["\047]|["\047]$/, "", v)
+      gsub(/\|/, "/", v)
+      return v
+    }
+    /^[A-Za-z_]/ { in_install = ($0 ~ /^install:/) }
+    /^name:/ { name = value($0) }
+    /^description:/ { description = value($0) }
+    in_install && /^[ \t]+package:/ { package = value($0) }
+    in_install && /^[ \t]+binary:/ { binary = value($0) }
+    END {
+      if (name != "" && package != "" && binary != "") {
+        print name "|" package "|" binary "|" description
+      }
+    }
+  ' "$1"
+}
+
+load_addons() {
+  local manifest line
+  for manifest in "$REPO_ROOT"/plugins/*/plugin.yml; do
+    [ -f "$manifest" ] || continue
+    line="$(manifest_addon "$manifest")"
+    if [ -n "$line" ]; then
+      ADDONS+=("$line|$manifest")
+    fi
+  done
+  if [ "${#ADDONS[@]}" -eq 0 ]; then
+    ADDONS=("mcp|simpletickets-mcp|simpletickets-mcp|MCP server so a client can list, create and update tickets|")
+  fi
+}
+
+load_addons
 
 usage() {
   cat <<'USAGE'
@@ -22,6 +67,9 @@ Usage: scripts/install.sh [options]
   --tickets-dir DIR      tickets folder the daemon manages (default: ~/SimpleTickets)
   --port N               daemon port on 127.0.0.1 (default: 7878)
   --addons LIST          comma-separated addons to install, or "none" (default: ask)
+  --plugins-dir DIR      where addon manifests are installed for the daemon to find
+                         (default: $SIMPLETICKETS_PLUGINS_DIR or
+                         ${XDG_CONFIG_HOME:-~/.config}/simpletickets/plugins)
   --from-source          build with cargo from this checkout
   --from-release         download the latest release archive
                          (default: from source when run inside a checkout with cargo)
@@ -39,7 +87,7 @@ Available addons:
 USAGE
   local entry
   for entry in "${ADDONS[@]}"; do
-    IFS='|' read -r name _ _ description <<<"$entry"
+    IFS='|' read -r name _ _ description _ <<<"$entry"
     printf '  %-8s %s\n' "$name" "$description"
   done
 }
@@ -53,6 +101,7 @@ PREFIX="$HOME/.local"
 TICKETS_DIR="$HOME/SimpleTickets"
 PORT=7878
 ADDON_LIST=""
+PLUGINS_DIR="${SIMPLETICKETS_PLUGINS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/simpletickets/plugins}"
 MODE="auto"
 AGENTS_DIR="$HOME/Library/LaunchAgents"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -68,6 +117,7 @@ while [ $# -gt 0 ]; do
     --tickets-dir) TICKETS_DIR="${2:?--tickets-dir needs a value}"; shift 2 ;;
     --port) PORT="${2:?--port needs a value}"; shift 2 ;;
     --addons) ADDON_LIST="${2:?--addons needs a value}"; shift 2 ;;
+    --plugins-dir) PLUGINS_DIR="${2:?--plugins-dir needs a value}"; shift 2 ;;
     --from-source) MODE="source"; shift ;;
     --from-release) MODE="release"; shift ;;
     --launchagents-dir) AGENTS_DIR="${2:?--launchagents-dir needs a value}"; shift 2 ;;
@@ -102,8 +152,6 @@ else
   [ -n "$OS" ] || die "unsupported system $(uname -s); use macOS or Linux (Windows: scripts/install.ps1)"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN_DIR="$PREFIX/bin"
 PLIST="$AGENTS_DIR/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/SimpleTickets"
@@ -142,12 +190,12 @@ ask() {
   esac
 }
 
-# Fills SELECTED with the crate|binary pairs of the chosen addons.
+# Fills SELECTED with the package|binary|name|manifest entries of the chosen addons.
 SELECTED=()
 select_addons() {
-  local entry name crate binary description
+  local entry name crate binary description manifest
   for entry in "${ADDONS[@]}"; do
-    IFS='|' read -r name crate binary description <<<"$entry"
+    IFS='|' read -r name crate binary description manifest <<<"$entry"
     local chosen=0
     if [ -n "$ADDON_LIST" ]; then
       case ",$ADDON_LIST," in
@@ -157,7 +205,7 @@ select_addons() {
       chosen=1
     fi
     if [ "$chosen" -eq 1 ]; then
-      SELECTED+=("$crate|$binary")
+      SELECTED+=("$crate|$binary|$name|$manifest")
     fi
   done
   if [ -n "$ADDON_LIST" ] && [ "$ADDON_LIST" != "none" ]; then
@@ -260,6 +308,28 @@ sha256_of() {
   fi
 }
 
+# Copies the manifests of the selected addons into PLUGINS_DIR so the daemon finds them.
+# $1: folder of an extracted release archive, used when an addon has no checkout manifest.
+install_manifests() {
+  local entry name manifest
+  for entry in "${SELECTED[@]+"${SELECTED[@]}"}"; do
+    IFS="|" read -r _ _ name manifest <<<"$entry"
+    if [ -z "$manifest" ] && [ -n "${1:-}" ] && [ -f "$1/plugins/$name/plugin.yml" ]; then
+      manifest="$1/plugins/$name/plugin.yml"
+    fi
+    if [ -z "$manifest" ]; then
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "would install the manifest of '$name' into $PLUGINS_DIR/$name"
+      else
+        echo "note: no manifest found for addon '$name'; the daemon will not list it"
+      fi
+      continue
+    fi
+    run mkdir -p "$PLUGINS_DIR/$name"
+    run install -m 0644 "$manifest" "$PLUGINS_DIR/$name/plugin.yml"
+  done
+}
+
 obtain_binaries() {
   # $@: binary names to install; core binary first.
   local names=("$@")
@@ -274,16 +344,19 @@ obtain_binaries() {
     for name in "${names[@]}"; do
       run install -m 0755 "$REPO_ROOT/target/release/$name" "$BIN_DIR/$name"
     done
+    install_manifests
   else
-    local asset tmp base
+    local asset base
     asset="$(release_asset)"
     base="https://github.com/$REPO/releases/latest/download"
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "would download $base/$asset, verify it against $base/SHA256SUMS and install: ${names[*]}"
+      install_manifests
       return
     fi
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
+    TMP_DIR="$(mktemp -d)"
+    trap 'rm -rf "$TMP_DIR"' EXIT
+    local tmp="$TMP_DIR"
     curl -fsSL "$base/$asset" -o "$tmp/$asset" || die "cannot download $base/$asset (no release published yet? try --from-source)"
     curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "cannot download $base/SHA256SUMS"
     local expected actual
@@ -297,6 +370,7 @@ obtain_binaries() {
       [ -f "$tmp/$name" ] || die "$name missing from $asset"
       install -m 0755 "$tmp/$name" "$BIN_DIR/$name"
     done
+    install_manifests "$tmp"
   fi
 }
 
@@ -304,12 +378,15 @@ select_addons
 
 NAMES=(simpletickets)
 for entry in "${SELECTED[@]+"${SELECTED[@]}"}"; do
-  NAMES+=("${entry#*|}")
+  NAMES+=("$(cut -d'|' -f2 <<<"$entry")")
 done
 
 echo "Install mode: $MODE"
 echo "Binaries:     $BIN_DIR (${NAMES[*]})"
 echo "Tickets:      $TICKETS_DIR"
+if [ "${#SELECTED[@]}" -gt 0 ]; then
+  echo "Plugins:      $PLUGINS_DIR"
+fi
 if [ "$SERVICE" -eq 1 ]; then
   if [ "$OS" = "macos" ]; then
     echo "Service:      $PLIST (port $PORT)"

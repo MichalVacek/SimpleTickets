@@ -18,7 +18,7 @@ Status: v0.1 scope is complete: the core (command line, daemon, local API, rules
 
 | Path | Contents |
 |---|---|
-| `docs/` | Specification and design review |
+| `docs/` | Specification, design review, API and plugin documentation |
 | `scripts/` | Installers: `install.sh` (macOS, Linux), `install.ps1` (Windows) |
 | `Dockerfile` | Container image |
 | `crates/` | Rust crates for the core |
@@ -47,6 +47,8 @@ simpletickets forget ST-2
 simpletickets reassign-id ST-4 --path ~/tickets/copy-of-st-4.md
 simpletickets rescan --dry-run
 simpletickets templates
+simpletickets plugins list
+simpletickets plugins enable mcp
 ```
 
 - `create` picks the next ID (`ST-1`, `ST-2`, ...), renders the body from a template (`--template`, default `default`) and writes `ID-title.md`. With `parent_folder` and `subticket_folder` configured, `--role parent` and `--parent` choose the folder.
@@ -54,6 +56,7 @@ simpletickets templates
 - The assignee is a core frontmatter key (`assignee: Ann`), a single line of text. `create --assignee`, `assign ID NAME` and `unassign ID` set and clear it; `list --assignee` matches case-insensitively and `list` shows it as `@name`. A top-level `assignee` text or number that already exists in a file is read as the core field, so `--field assignee=Ann` and files written before it became a core key keep working; an `assignee` of any other shape (a list, say) stays a free-form key.
 - `search QUERY` finds tickets by title and body text, best match first, with a snippet of the first body match (`--json` adds `score`, `match_field` and `snippet`; `--limit`, `--status`, `--category`, `--assignee`, `--tag` narrow it). See Search below.
 - `set-status`, `create` and `rescan` run the rules afterwards. A sub-ticket in progress sets its parent to in progress; a done (or, by default, cancelled) blocker stops blocking. Parents inside `parent_folder` are specification files: their state is derived and never written. Automatic changes are appended to `.simpletickets/audit.jsonl`; `rescan --dry-run` shows them without writing.
+- `plugins list|enable|disable|status` manages plugins: manifests are found in `.simpletickets/plugins/<name>/plugin.yml` and in the per-user plugins folder, and the `plugins.enabled` list in `simpletickets.yml` says which are on. See [docs/plugins.md](docs/plugins.md).
 - Custom templates are Markdown files in `.simpletickets/templates/NAME.md` using `{{title}}`, `{{id}}` and `{{date}}`.
 - `doctor` exits non-zero when it finds duplicate IDs, malformed frontmatter, missing link targets, cycles, orphans or an offline root. It also lists the rule warnings recorded by the last rule run (see below); warnings never change the exit code.
 - `forget ID` acknowledges a deleted ticket (see Data safety). `reassign-id ID [--path FILE]` resolves a duplicate ID (see Duplicate IDs).
@@ -101,9 +104,9 @@ Status: untested. The script has not been run or parsed by PowerShell, and the W
 
 ### Options of `install.sh`
 
-`--prefix`, `--tickets-dir`, `--port`, `--addons mcp|none`, `--from-source`, `--from-release`, `--launchagents-dir` (macOS), `--systemd-dir` (Linux), `--no-service`, `--no-load`, `--yes`, `--dry-run`, `--os macos|linux` (previews only, needs `--dry-run`).
+`--prefix`, `--tickets-dir`, `--port`, `--addons LIST|none`, `--plugins-dir`, `--from-source`, `--from-release`, `--launchagents-dir` (macOS), `--systemd-dir` (Linux), `--no-service`, `--no-load`, `--yes`, `--dry-run`, `--os macos|linux` (previews only, needs `--dry-run`).
 
-New addons are one line in the `ADDONS` list at the top of each script: name, crate, binary and description.
+`install.sh` builds its addon list from the plugin manifests in `plugins/*/plugin.yml`: a manifest with an `install:` block (package and binary) is offered as an addon, and its manifest is copied into the per-user plugins folder so the daemon finds it (see [docs/plugins.md](docs/plugins.md)). `install.ps1` still has its own `$Addons` list.
 
 ## Docker
 

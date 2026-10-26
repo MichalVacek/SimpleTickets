@@ -74,7 +74,7 @@ plugins/
 
 ## Open questions
 
-- Plugin discovery and supervision (the MCP plugin is started by its client; supervision comes later).
+- Plugin sandboxing: plugins run with the user's rights and the full API token; capabilities in a manifest are declarations, not enforcement (see [plugins.md](plugins.md)).
 - Windows as a real service, signed releases, musl builds.
 - Release archives: `release.yml` publishes the assets the installers expect; it has not run yet (no tag pushed). Windows and Linux installs are untested on real machines.
 - The Docker image listens on all interfaces inside the container (`--bind-all`); revisit if a safer way to reach the API from the host is wanted.

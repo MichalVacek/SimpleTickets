@@ -94,13 +94,13 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 - Ticket-level events (`ticket.created`, `ticket.updated`, `ticket.status_changed`, `ticket.moved`, `ticket.deleted`) come from diffing the previous and the new ticket index on every scan, so one code path covers API writes, rule writes, command line writes and hand edits. The `source` field (`api`, `rule`, `scan`) is best effort. Edits between two scans can collapse into one event.
 - API versioning: the version is the integer in the path (`/v1`) and is reported as `api_version` by health and in the `X-SimpleTickets-Api-Version` header. Within a version changes are additive only; a breaking change goes to `/v2` and `/v1` stays for at least 12 months. Clients ignore unknown fields and event types.
 - Webhooks are core, config-driven and outgoing only (`webhooks` in `simpletickets.yml`: `url`, event globs, `secret_env`). Bodies are the event envelope, signed with HMAC-SHA256 over `timestamp.body`; the secret is read from a named environment variable and never stored. Only `http` and `https` URLs are accepted, local and private targets are allowed. Delivery has its own queue and threads per webhook, retries with capped backoff, and never blocks the API or the rules; a failed event is dropped after the last attempt and logged. It stays at-least-once and not durable; durable consumers use the event stream.
+- Plugins are described by a `plugin.yml` manifest (YAML, like the config) in `<tickets folder>/.simpletickets/plugins/<name>/` or the per-user plugins folder; `plugins.enabled` in `simpletickets.yml` lists the enabled ones. A `stdio-client` plugin is started by its client; a `service` plugin is started and supervised by the daemon. The token reaches a plugin through a file path or an environment variable, never the command line. See [plugins.md](plugins.md).
 
 ## Open questions
 
 - Offline detection is per root: an unreadable subfolder inside a readable root is reported by doctor, but its tickets are covered by tombstones only, not frozen.
 - The lease compares heartbeats with the local clock, so a large clock difference between machines sharing a folder can make a live lease look stale. Should it carry a host name, or use file locks where the file system supports them?
 - Durable webhook delivery (an on-disk queue that survives a daemon restart) and a way to replay missed events, if a receiver ever needs more than at-least-once while the daemon is up.
-- Plugin discovery, install and lifecycle (who starts and supervises plugin processes).
 - Config schema: tags with custom logging, status-to-category mapping, roots, auto-scan folders.
 - Daemon packaging per OS (launchd first) and the Docker polling fallback.
 - See [design review](design-review.md) for the full list of edge cases and risks.

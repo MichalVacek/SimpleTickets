@@ -123,6 +123,8 @@ pub struct Config {
     review_status: String,
     pub finished_parent: FinishedParent,
     pub webhooks: Vec<Webhook>,
+    /// Names of the enabled plugins; see [`crate::plugin`].
+    pub plugins: Vec<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -154,6 +156,14 @@ struct RawConfig {
     subticket_under_finished_parent: Option<FinishedParent>,
     #[serde(default)]
     webhooks: Vec<RawWebhook>,
+    plugins: Option<RawPlugins>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPlugins {
+    #[serde(default)]
+    enabled: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,6 +202,7 @@ impl Config {
             review_status: DEFAULT_REVIEW_STATUS.into(),
             finished_parent: FinishedParent::default(),
             webhooks: Vec::new(),
+            plugins: Vec::new(),
         }
     }
 
@@ -298,6 +309,19 @@ impl Config {
             .map(build_webhook)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let mut plugins: Vec<String> = Vec::new();
+        for name in raw.plugins.map(|p| p.enabled).unwrap_or_default() {
+            if !crate::plugin::is_valid_name(&name) {
+                return invalid(format!(
+                    "plugins.enabled: `{name}` is not a valid plugin name (lower-case letters, \
+                     digits, `-` and `_`)"
+                ));
+            }
+            if !plugins.contains(&name) {
+                plugins.push(name);
+            }
+        }
+
         Ok(Config {
             dir: dir.to_path_buf(),
             id_prefix,
@@ -312,6 +336,7 @@ impl Config {
             review_status,
             finished_parent: raw.subticket_under_finished_parent.unwrap_or_default(),
             webhooks,
+            plugins,
         })
     }
 
@@ -375,6 +400,7 @@ impl Config {
                 "events": w.events,
                 "secret_env": w.secret_env,
             })).collect::<Vec<_>>(),
+            "plugins": {"enabled": self.plugins},
         })
     }
 
@@ -660,6 +686,16 @@ cancelled_unblocks: false\n",
             "http://127.0.0.1:9000/hook"
         );
         assert!(parse("").unwrap().webhooks.is_empty());
+    }
+
+    #[test]
+    fn parses_enabled_plugins() {
+        let c = parse("plugins:\n  enabled: [mcp, ui, mcp]\n").unwrap();
+        assert_eq!(c.plugins, ["mcp", "ui"]);
+        assert_eq!(c.to_json()["plugins"]["enabled"][1], "ui");
+        assert!(parse("").unwrap().plugins.is_empty());
+        assert!(parse("plugins:\n  enabled: [\"Bad Name\"]\n").is_err());
+        assert!(parse("plugins:\n  enable: [mcp]\n").is_err());
     }
 
     #[test]

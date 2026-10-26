@@ -11,6 +11,7 @@ pub mod known;
 pub mod lease;
 pub mod migration;
 pub mod ops;
+pub mod plugin;
 pub mod query;
 pub mod rules;
 pub mod search;

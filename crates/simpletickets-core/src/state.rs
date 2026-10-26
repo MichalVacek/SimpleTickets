@@ -46,6 +46,11 @@ pub fn templates_dir(dir: &Path) -> PathBuf {
     state_dir(dir).join("templates")
 }
 
+/// Plugins installed for this tickets folder only: `<name>/plugin.yml` below this folder.
+pub fn plugins_dir(dir: &Path) -> PathBuf {
+    state_dir(dir).join("plugins")
+}
+
 pub fn token_path(dir: &Path) -> PathBuf {
     state_dir(dir).join("token")
 }
