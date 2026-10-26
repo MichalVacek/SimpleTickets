@@ -211,6 +211,7 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
             }
         }
         (["v1", "tickets", id], "PATCH" | "PUT") => update_ticket(shared, req, id),
+        (["v1", "tickets", id, "reassign-id"], "POST") => reassign_id(shared, req, id),
         (["v1", "rescan"], "POST") => reply(200, shared.rescan("api").0),
         (["v1", "doctor"], "GET") => {
             let inner = shared.lock();
@@ -246,7 +247,8 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
             ["v1", "health" | "parents" | "tickets" | "rescan" | "doctor" | "config" | "migration"
             | "events" | "audit" | "templates" | "tombstones"]
             | ["v1", "migration", "resume"]
-            | ["v1", "tickets" | "tombstones", _],
+            | ["v1", "tickets" | "tombstones", _]
+            | ["v1", "tickets", _, "reassign-id"],
             _,
         ) => error(405, "method not allowed"),
         _ => error(404, "not found"),
@@ -330,6 +332,41 @@ fn after_write(shared: &Shared, inner: &mut Inner, reason: &str, id: &str, statu
     match inner.store.get(id) {
         Some(e) => reply(status, ticket_json(&inner.store, e, true)),
         None => error(500, format!("ticket {id} not found after write")),
+    }
+}
+
+/// Gives a conflicted copy of ticket `id` a new ID. The body may name the copy
+/// with `path`; it can be left out when there is exactly one copy.
+fn reassign_id(shared: &Shared, req: &Request, id: &str) -> Reply {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(deny_unknown_fields)]
+    struct Body {
+        path: Option<String>,
+    }
+    let body: Body = if req.body.iter().all(u8::is_ascii_whitespace) {
+        Body::default()
+    } else {
+        match parse_body(req) {
+            Ok(b) => b,
+            Err(r) => return r,
+        }
+    };
+    let mut inner = shared.lock();
+    let path = body.path.as_deref().map(std::path::Path::new);
+    match ops::reassign_id(&inner.store, id, path, explicit_write()) {
+        Ok(done) => {
+            shared.events.publish(
+                "ticket.id_reassigned",
+                json!({"old_id": done.old_id, "new_id": done.new_id,
+                       "path": done.path.display().to_string()}),
+            );
+            let mut reply = after_write(shared, &mut inner, "reassign-id", &done.new_id, 200);
+            if let Value::Object(map) = &mut reply.body {
+                map.insert("old_id".into(), json!(done.old_id));
+            }
+            reply
+        }
+        Err(e) => e.into(),
     }
 }
 

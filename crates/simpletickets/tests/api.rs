@@ -177,6 +177,7 @@ fn rejects_bad_requests() {
     );
     assert_eq!(api.get("/v1/tickets/ST-9").0, 404);
     assert_eq!(api.call("DELETE", "/v1/tickets/ST-1", None).0, 405);
+    assert_eq!(api.get("/v1/tickets/ST-1/reassign-id").0, 405);
     assert_eq!(api.get("/v1/nope").0, 404);
     assert_eq!(api.get("/v1/tickets").1.as_array().unwrap().len(), 1);
 }
@@ -800,4 +801,63 @@ fn rule_warnings_are_persisted_exposed_by_doctor_and_announced() {
         "{after:?}"
     );
     assert!(after.contains(&"parent-in-progress:P".to_string()));
+}
+
+fn age(path: &std::path::Path, seconds: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[test]
+fn duplicate_ids_keep_the_older_file_and_reassign_gives_the_copy_a_new_id() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "old.md", &ticket_text("A", "in-progress", ""));
+    age(&dir.path().join("old.md"), 300);
+    write(dir.path(), "copy.md", &ticket_text("A", "todo", ""));
+    let api = start(dir.path(), false, SLOW);
+
+    let (_, a) = api.get("/v1/tickets/A");
+    assert_eq!(a["status"], "in-progress");
+    assert!(a["path"].as_str().unwrap().ends_with("old.md"));
+    let (_, doctor) = api.get("/v1/doctor");
+    assert_eq!(doctor["clean"], false);
+    let issue = doctor["issues"][0].as_str().unwrap();
+    assert!(
+        issue.contains("duplicate id A") && issue.contains("copy.md"),
+        "{issue}"
+    );
+
+    assert_eq!(api.get("/v1/tickets/B/reassign-id").0, 405);
+    assert_eq!(api.post("/v1/tickets/NOPE/reassign-id", "").0, 404);
+    let old = dir.path().join("old.md");
+    let body = format!(r#"{{"path":"{}"}}"#, old.display());
+    assert_eq!(api.post("/v1/tickets/A/reassign-id", &body).0, 400);
+    assert_eq!(
+        api.post("/v1/tickets/A/reassign-id", r#"{"bogus":1}"#).0,
+        400
+    );
+
+    let (status, done) = api.post("/v1/tickets/A/reassign-id", "");
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["old_id"], "A");
+    let new_id = done["id"].as_str().unwrap().to_string();
+    assert_ne!(new_id, "A");
+    assert!(done["path"].as_str().unwrap().ends_with("copy.md"));
+    assert_eq!(done["status"], "todo");
+    assert_eq!(api.get("/v1/doctor").1["clean"], true);
+    assert_eq!(api.get("/v1/tickets/A").1["status"], "in-progress");
+    let text = std::fs::read_to_string(dir.path().join("copy.md")).unwrap();
+    assert!(text.contains(&format!("id: {new_id}")));
+    let (_, events) = api.get("/v1/events");
+    assert!(events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "ticket.id_reassigned"));
+    assert_eq!(api.post("/v1/tickets/A/reassign-id", "").0, 400);
 }

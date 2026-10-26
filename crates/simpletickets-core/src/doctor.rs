@@ -16,8 +16,13 @@ pub enum Issue {
     },
     /// A file or folder that could not be read.
     Unreadable { path: PathBuf, message: String },
-    /// Several files claim the same ID.
-    DuplicateId { id: String, paths: Vec<PathBuf> },
+    /// Several files claim the same ID: `kept` is indexed, the `copies` are
+    /// conflicted and need a new ID.
+    DuplicateId {
+        id: String,
+        kept: PathBuf,
+        copies: Vec<PathBuf>,
+    },
     /// A link points at an ID that no ticket has. `tombstoned` marks an ID that
     /// existed earlier: a missing blocker of that kind keeps blocking.
     MissingTarget {
@@ -62,9 +67,14 @@ impl fmt::Display for Issue {
             Issue::Unreadable { path, message } => {
                 write!(f, "{}: unreadable: {message}", path.display())
             }
-            Issue::DuplicateId { id, paths } => {
-                let list: Vec<_> = paths.iter().map(|p| p.display().to_string()).collect();
-                write!(f, "duplicate id {id}: {}", list.join(", "))
+            Issue::DuplicateId { id, kept, copies } => {
+                let list: Vec<_> = copies.iter().map(|p| p.display().to_string()).collect();
+                write!(
+                    f,
+                    "duplicate id {id}: kept {}; conflicted: {} (run `reassign-id {id} --path <file>`)",
+                    kept.display(),
+                    list.join(", ")
+                )
             }
             Issue::MissingTarget {
                 from,
@@ -167,13 +177,14 @@ pub fn check(store: &Store) -> Report {
         });
     }
 
-    for (id, paths) in store.duplicates() {
-        let mut paths = paths.clone();
-        paths.sort();
-        issues.push(Issue::DuplicateId {
-            id: id.clone(),
-            paths,
-        });
+    for (id, copies) in store.conflicts() {
+        if let Some(kept) = store.get(id) {
+            issues.push(Issue::DuplicateId {
+                id: id.clone(),
+                kept: kept.path.clone(),
+                copies: copies.iter().map(|c| c.path.clone()).collect(),
+            });
+        }
     }
 
     let config = store.config();
@@ -333,9 +344,10 @@ mod tests {
             .issues
             .iter()
             .any(|i| matches!(i, Issue::Malformed { line: Some(_), .. })));
-        assert!(r.issues.iter().any(
-            |i| matches!(i, Issue::DuplicateId { id, paths } if id == "A" && paths.len() == 2)
-        ));
+        assert!(r.issues.iter().any(|i| matches!(
+            i,
+            Issue::DuplicateId { id, copies, .. } if id == "A" && copies.len() == 1
+        )));
         assert!(r.to_string().contains("bad.md:"));
     }
 
@@ -387,6 +399,27 @@ mod tests {
             text.contains("tombstone") && text.contains("forget B"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn duplicate_report_names_the_kept_file_and_the_conflicted_copy() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "old.md", &ticket("A", "todo", ""));
+        write(d.path(), "copy.md", &ticket("A", "todo", ""));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(d.path().join("old.md"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let text = report(d.path()).to_string();
+        assert!(text.contains("kept") && text.contains("old.md"), "{text}");
+        assert!(
+            text.contains("conflicted") && text.contains("copy.md"),
+            "{text}"
+        );
+        assert!(text.contains("reassign-id A"));
     }
 
     #[test]

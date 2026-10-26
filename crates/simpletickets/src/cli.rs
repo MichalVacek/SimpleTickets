@@ -51,6 +51,14 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Give a conflicted copy of a duplicated ticket ID a fresh ID (only its frontmatter id changes)
+    ReassignId {
+        /// The duplicated ID
+        id: String,
+        /// The copy to change; optional when there is exactly one
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
     /// Acknowledge a deleted ticket so links to it stop counting (releases its blocked tickets)
     Forget { id: String },
     /// Scan all folders and run the rules
@@ -311,6 +319,19 @@ pub fn run(cli: Cli) -> Result<ExitCode, String> {
             } else {
                 println!("{id} is already {status}");
             }
+            ctx.reconcile(ctx.scan());
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::ReassignId { id, path } => {
+            let store = ctx.scan();
+            let done = ops::reassign_id(&store, &id, path.as_deref(), explicit().write)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{} -> {} ({})",
+                done.old_id,
+                done.new_id,
+                done.path.display()
+            );
             ctx.reconcile(ctx.scan());
             Ok(ExitCode::SUCCESS)
         }

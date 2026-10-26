@@ -272,3 +272,50 @@ fn doctor_lists_persisted_warnings_without_failing() {
     ok(d, &["set-status", &a, "done"]);
     assert!(!ok(d, &["doctor"]).contains("warning"));
 }
+
+#[test]
+fn reassign_id_resolves_a_duplicate_found_by_doctor() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let a = create_id(d, &["Original"]);
+    let original = d.join(format!("{a}-original.md"));
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(300);
+    std::fs::File::options()
+        .write(true)
+        .open(&original)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+    let copy = d.join("copied.md");
+    std::fs::copy(&original, &copy).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&copy)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+
+    let out = st(d, &["doctor"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("duplicate id ST-1") && text.contains("copied.md"),
+        "{text}"
+    );
+
+    assert!(!st(
+        d,
+        &["reassign-id", "ST-1", "--path", original.to_str().unwrap()]
+    )
+    .status
+    .success());
+    let out = ok(
+        d,
+        &["reassign-id", "ST-1", "--path", copy.to_str().unwrap()],
+    );
+    assert!(out.starts_with("ST-1 -> ST-2"), "{out}");
+    assert!(ok(d, &["doctor"]).contains("no problems"));
+    assert!(ok(d, &["show", "ST-2"]).contains("copied.md"));
+    assert!(ok(d, &["show", "ST-1"]).contains(&format!("{a}-original.md")));
+    assert!(!st(d, &["reassign-id", "ST-1"]).status.success());
+}

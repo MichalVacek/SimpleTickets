@@ -242,7 +242,7 @@ impl Shared {
                 .publish("state.error", json!({"message": message}));
         }
         let problems =
-            store.problems().len() + store.duplicates().len() + store.offline_roots().len();
+            store.problems().len() + store.conflicts().len() + store.offline_roots().len();
         let summary = json!({
             "reason": reason,
             "tickets": store.tickets().count(),

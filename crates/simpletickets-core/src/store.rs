@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct IndexedTicket {
@@ -51,8 +52,9 @@ pub struct Store {
     config: Config,
     tickets: BTreeMap<String, IndexedTicket>,
     problems: Vec<ScanProblem>,
-    /// IDs claimed by more than one file; those files are left out of the index.
-    duplicates: BTreeMap<String, Vec<PathBuf>>,
+    /// Files that claim an ID already held by an older file; they are left out of
+    /// the index and listed here, oldest first.
+    conflicts: BTreeMap<String, Vec<IndexedTicket>>,
     children: BTreeMap<String, Vec<String>>,
     blocks: BTreeMap<String, Vec<String>>,
     related_by: BTreeMap<String, Vec<String>>,
@@ -109,7 +111,7 @@ impl Store {
             }
         }
 
-        let mut by_id: BTreeMap<String, Vec<IndexedTicket>> = BTreeMap::new();
+        let mut by_id: BTreeMap<String, Vec<(SystemTime, IndexedTicket)>> = BTreeMap::new();
         for (path, kind) in files {
             let bytes = match fs::read(&path) {
                 Ok(b) => b,
@@ -133,15 +135,18 @@ impl Store {
             if kind == RootKind::Repo && !has_ticket_marker(&text) {
                 continue;
             }
+            let modified = fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .unwrap_or_else(|_| SystemTime::now());
             match Ticket::parse(&text) {
-                Ok(ticket) => by_id
-                    .entry(ticket.id.clone())
-                    .or_default()
-                    .push(IndexedTicket {
+                Ok(ticket) => by_id.entry(ticket.id.clone()).or_default().push((
+                    modified,
+                    IndexedTicket {
                         hash: content_hash(text.as_bytes()),
                         ticket,
                         path,
-                    }),
+                    },
+                )),
                 Err(e) => problems.push(ScanProblem::Malformed {
                     path,
                     line: e.line,
@@ -152,22 +157,22 @@ impl Store {
 
         let mut tickets = BTreeMap::new();
         let mut frozen = BTreeSet::new();
-        let mut duplicates = BTreeMap::new();
+        let mut conflicts = BTreeMap::new();
         for (id, mut group) in by_id {
-            if group.len() == 1 {
-                tickets.insert(id, group.pop().expect("one element"));
-            } else {
-                duplicates.insert(id, group.into_iter().map(|t| t.path).collect());
+            // The oldest file, then the smallest path, keeps the ID.
+            group.sort_by(|a, b| (a.0, &a.1.path).cmp(&(b.0, &b.1.path)));
+            let mut group = group.into_iter().map(|(_, t)| t);
+            tickets.insert(id.clone(), group.next().expect("at least one file"));
+            let copies: Vec<IndexedTicket> = group.collect();
+            if !copies.is_empty() {
+                conflicts.insert(id, copies);
             }
         }
 
         if let Some(previous) = previous {
             for root in offline.keys() {
                 for (id, entry) in &previous.tickets {
-                    if !tickets.contains_key(id)
-                        && !duplicates.contains_key(id)
-                        && is_within(&entry.path, root)
-                    {
+                    if !tickets.contains_key(id) && is_within(&entry.path, root) {
                         frozen.insert(id.clone());
                         tickets.insert(id.clone(), entry.clone());
                     }
@@ -190,7 +195,7 @@ impl Store {
             config: config.clone(),
             tickets,
             problems,
-            duplicates,
+            conflicts,
             children: BTreeMap::new(),
             blocks: BTreeMap::new(),
             related_by: BTreeMap::new(),
@@ -252,13 +257,15 @@ impl Store {
         &self.problems
     }
 
-    pub fn duplicates(&self) -> &BTreeMap<String, Vec<PathBuf>> {
-        &self.duplicates
+    /// Copies of tickets whose ID is held by an older file, by ID. The index
+    /// keeps the older file; the copies need a new ID (see `ops::reassign_id`).
+    pub fn conflicts(&self) -> &BTreeMap<String, Vec<IndexedTicket>> {
+        &self.conflicts
     }
 
     /// True if `id` is used by at least two files.
     pub fn is_duplicate(&self, id: &str) -> bool {
-        self.duplicates.contains_key(id)
+        self.conflicts.contains_key(id)
     }
 
     /// Roots that could not be read, with the reason, ordered by path.
@@ -542,17 +549,57 @@ mod tests {
         assert_eq!(s.problems().len(), 1);
     }
 
+    fn set_mtime(path: &Path, seconds_ago: u64) {
+        let when = SystemTime::now() - std::time::Duration::from_secs(seconds_ago);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
     #[test]
-    fn duplicate_ids_are_excluded_and_recorded() {
+    fn duplicate_ids_keep_the_older_file_and_record_the_copy() {
         let d = tempfile::tempdir().unwrap();
-        write(d.path(), "one.md", &ticket("A", "todo", ""));
-        write(d.path(), "two.md", &ticket("A", "done", ""));
+        write(d.path(), "a-new.md", &ticket("A", "todo", ""));
+        write(d.path(), "z-old.md", &ticket("A", "done", ""));
         write(d.path(), "three.md", &ticket("B", "todo", ""));
+        set_mtime(&d.path().join("z-old.md"), 100);
         let s = scan(d.path());
-        assert!(!s.contains("A"));
         assert!(s.is_duplicate("A"));
-        assert_eq!(s.duplicates()["A"].len(), 2);
-        assert!(s.contains("B"));
+        assert!(s.get("A").unwrap().path.ends_with("z-old.md"));
+        assert_eq!(s.get("A").unwrap().ticket.status, "done");
+        assert_eq!(s.conflicts()["A"].len(), 1);
+        assert!(s.conflicts()["A"][0].path.ends_with("a-new.md"));
+        assert!(s.contains("B") && !s.is_duplicate("B"));
+    }
+
+    #[test]
+    fn equal_modification_times_fall_back_to_the_path() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "b.md", &ticket("A", "todo", ""));
+        write(d.path(), "a.md", &ticket("A", "todo", ""));
+        write(d.path(), "c.md", &ticket("A", "todo", ""));
+        for name in ["a.md", "b.md", "c.md"] {
+            set_mtime(&d.path().join(name), 50);
+        }
+        let t = fs::metadata(d.path().join("a.md"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        for name in ["b.md", "c.md"] {
+            fs::File::options()
+                .write(true)
+                .open(d.path().join(name))
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        }
+        let s = scan(d.path());
+        assert!(s.get("A").unwrap().path.ends_with("a.md"));
+        let copies: Vec<_> = s.conflicts()["A"].iter().map(|c| c.path.clone()).collect();
+        assert!(copies[0].ends_with("b.md") && copies[1].ends_with("c.md"));
     }
 
     #[test]
@@ -563,7 +610,7 @@ mod tests {
         config.auto_scan = vec![d.path().join("sub")];
         let s = Store::scan(&config);
         assert_eq!(s.ids().len(), 1);
-        assert!(s.duplicates().is_empty());
+        assert!(s.conflicts().is_empty());
     }
 
     #[test]

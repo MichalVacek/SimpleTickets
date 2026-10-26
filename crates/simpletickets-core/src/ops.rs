@@ -129,8 +129,6 @@ fn check_due(due: &str) -> Result<(), OpError> {
 fn check_exists(store: &Store, field: &str, target: &str) -> Result<(), OpError> {
     if store.contains(target) {
         Ok(())
-    } else if store.is_duplicate(target) {
-        invalid(format!("`{field}` target {target} has duplicate IDs"))
     } else {
         invalid(format!("`{field}` points to missing ticket {target}"))
     }
@@ -291,7 +289,6 @@ pub fn create(store: &Store, dir: &Path, new: NewTicket) -> Result<Created, OpEr
     let folder = target_folder(store, &new)?;
 
     let mut taken: HashSet<String> = store.ids().into_iter().collect();
-    taken.extend(store.duplicates().keys().cloned());
     taken.extend(store.tombstones().into_iter().map(|t| t.id));
     let template = new.template.as_deref().unwrap_or(DEFAULT_TEMPLATE);
     for _ in 0..8 {
@@ -338,6 +335,80 @@ pub fn create(store: &Store, dir: &Path, new: NewTicket) -> Result<Created, OpEr
     Err(OpError::Conflict("could not find a free ticket ID".into()))
 }
 
+/// The result of giving a conflicted copy a new ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reassigned {
+    pub old_id: String,
+    pub new_id: String,
+    pub path: PathBuf,
+}
+
+/// Gives a conflicted copy of ticket `id` a fresh ID.
+///
+/// Only the `id` line of the copy's frontmatter is rewritten, and only if the file
+/// still has the content the store saw. `path` picks the copy when several exist.
+/// The file that keeps the ID is never touched.
+pub fn reassign_id(
+    store: &Store,
+    id: &str,
+    path: Option<&Path>,
+    options: WriteOptions,
+) -> Result<Reassigned, OpError> {
+    let Some(copies) = store.conflicts().get(id) else {
+        return Err(if store.contains(id) {
+            OpError::Invalid(format!("{id} has no conflicted copy; nothing to reassign"))
+        } else {
+            OpError::NotFound(format!("no ticket {id}"))
+        });
+    };
+    let list = || {
+        copies
+            .iter()
+            .map(|c| c.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let copy = match path {
+        Some(p) => {
+            let wanted = crate::state::resolve(p);
+            let kept = store.get(id).is_some_and(|e| e.path == wanted);
+            if kept {
+                return invalid(format!(
+                    "{} is the file that keeps {id}; pick one of the copies: {}",
+                    p.display(),
+                    list()
+                ));
+            }
+            copies.iter().find(|c| c.path == wanted).ok_or_else(|| {
+                OpError::NotFound(format!(
+                    "{} is not a conflicted copy of {id}; copies: {}",
+                    p.display(),
+                    list()
+                ))
+            })?
+        }
+        None if copies.len() == 1 => &copies[0],
+        None => {
+            return invalid(format!(
+                "{id} has {} conflicted copies; pass the path of the one to reassign: {}",
+                copies.len(),
+                list()
+            ))
+        }
+    };
+
+    let mut taken: HashSet<String> = store.ids().into_iter().collect();
+    taken.extend(store.conflicts().keys().cloned());
+    taken.extend(store.tombstones().into_iter().map(|t| t.id));
+    let new_id = next_id(&store.config().id_prefix, &taken, |_| false);
+    patch_file(&copy.path, &copy.hash, &Patch::new().id(&new_id), options)?;
+    Ok(Reassigned {
+        old_id: id.to_string(),
+        new_id,
+        path: copy.path.clone(),
+    })
+}
+
 /// Acknowledges a tombstone: the missing ticket `id` was deleted on purpose,
 /// so links to it stop counting (a missing blocker no longer blocks).
 pub fn forget_tombstone(store: &Store, id: &str) -> Result<(), OpError> {
@@ -380,11 +451,7 @@ pub fn update(
     options: WriteOptions,
 ) -> Result<WriteOutcome, OpError> {
     let Some(entry) = store.get(id) else {
-        return Err(if store.is_duplicate(id) {
-            OpError::Conflict(format!("duplicate id {id}"))
-        } else {
-            OpError::NotFound(format!("no ticket {id}"))
-        });
+        return Err(OpError::NotFound(format!("no ticket {id}")));
     };
     if store.is_frozen(id) {
         return Err(OpError::Conflict(format!(
@@ -681,6 +748,108 @@ mod tests {
         let mut n = new("child");
         n.parent = Some("P".into());
         assert!(create(&store, dir.path(), n).is_ok());
+    }
+
+    /// Copies `orig.md` and stamps the copy with the current time, as a fresh copy has.
+    fn copy_newer(dir: &Path, name: &str) {
+        fs::copy(dir.join("orig.md"), dir.join(name)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(dir.join(name))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
+    }
+
+    fn conflicted() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "orig.md",
+            "---\r\nid: ST-1\r\ntitle: One\r\nstatus: todo\r\nx-note: keep me\r\n---\r\nbody\r\n",
+        );
+        let old = std::time::SystemTime::now() - Duration::from_secs(120);
+        fs::File::options()
+            .write(true)
+            .open(dir.path().join("orig.md"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        copy_newer(dir.path(), "copy.md");
+        write(dir.path(), "other.md", &ticket("ST-7", "todo", ""));
+        let store = Store::scan(&Config::default_for(dir.path()));
+        (dir, store)
+    }
+
+    #[test]
+    fn reassign_changes_only_the_id_line_of_the_copy() {
+        let (dir, store) = conflicted();
+        assert!(store.get("ST-1").unwrap().path.ends_with("orig.md"));
+        let copy = dir.path().join("copy.md");
+        let before = fs::read_to_string(&copy).unwrap();
+        let orig_before = fs::read_to_string(dir.path().join("orig.md")).unwrap();
+
+        let done = reassign_id(&store, "ST-1", None, NOW).unwrap();
+        assert_eq!(done.old_id, "ST-1");
+        assert_eq!(done.new_id, "ST-8");
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            before.replace("id: ST-1", "id: ST-8")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("orig.md")).unwrap(),
+            orig_before
+        );
+        let after = Store::scan(store.config());
+        assert!(after.conflicts().is_empty());
+        assert_eq!(after.ids().len(), 3);
+        assert!(after.get("ST-8").unwrap().path.ends_with("copy.md"));
+    }
+
+    #[test]
+    fn reassign_validates_the_target_and_uses_compare_and_swap() {
+        let (dir, store) = conflicted();
+        let orig = dir.path().join("orig.md");
+        assert!(matches!(
+            reassign_id(&store, "ST-1", Some(&orig), NOW),
+            Err(OpError::Invalid(m)) if m.contains("keeps ST-1")
+        ));
+        assert!(matches!(
+            reassign_id(&store, "ST-1", Some(&dir.path().join("other.md")), NOW),
+            Err(OpError::NotFound(_))
+        ));
+        assert!(matches!(
+            reassign_id(&store, "ST-7", None, NOW),
+            Err(OpError::Invalid(_))
+        ));
+        assert!(matches!(
+            reassign_id(&store, "ST-99", None, NOW),
+            Err(OpError::NotFound(_))
+        ));
+
+        let copy = dir.path().join("copy.md");
+        fs::write(&copy, "---\nid: ST-1\ntitle: edited\nstatus: todo\n---\n").unwrap();
+        assert!(matches!(
+            reassign_id(&store, "ST-1", Some(&copy), NOW),
+            Err(OpError::Conflict(_))
+        ));
+        assert!(fs::read_to_string(&copy).unwrap().contains("id: ST-1"));
+    }
+
+    #[test]
+    fn reassign_needs_a_path_when_several_copies_exist() {
+        let (dir, _) = conflicted();
+        copy_newer(dir.path(), "copy2.md");
+        let store = Store::scan(&Config::default_for(dir.path()));
+        assert!(matches!(
+            reassign_id(&store, "ST-1", None, NOW),
+            Err(OpError::Invalid(m)) if m.contains("2 conflicted copies")
+        ));
+        let pick = dir.path().join("copy2.md");
+        let done = reassign_id(&store, "ST-1", Some(&pick), NOW).unwrap();
+        assert!(done.path.ends_with("copy2.md"));
+        let after = Store::scan(store.config());
+        assert_eq!(after.conflicts()["ST-1"].len(), 1);
     }
 
     #[test]

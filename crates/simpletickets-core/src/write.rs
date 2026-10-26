@@ -48,7 +48,7 @@ impl Default for WriteOptions {
     }
 }
 
-/// A set of changes to owned frontmatter keys. The `id` cannot be patched.
+/// A set of changes to owned frontmatter keys. Only `ops::reassign_id` patches the `id`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Patch {
     fields: Vec<(&'static str, Option<Value>)>,
@@ -78,6 +78,10 @@ impl Patch {
             key,
             (!items.is_empty()).then(|| Value::List(items.to_vec())),
         )
+    }
+
+    pub fn id(self, id: &str) -> Self {
+        self.scalar("id", Some(id))
     }
 
     pub fn title(self, title: &str) -> Self {
