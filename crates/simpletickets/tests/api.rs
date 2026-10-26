@@ -529,3 +529,87 @@ fn deleted_blocker_stays_open_until_its_tombstone_is_forgotten() {
         .iter()
         .any(|e| e["type"] == "tombstone.forgotten"));
 }
+
+#[test]
+fn offline_root_freezes_its_tickets_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let ext_parent = tempfile::tempdir().unwrap();
+    let ext = ext_parent.path().join("vault");
+    write(&ext, "x.md", &ticket_text("X", "in-progress", ""));
+    write(
+        dir.path(),
+        "w.md",
+        &ticket_text("W", "todo", "blocked_by: [X]\n"),
+    );
+    write(
+        dir.path(),
+        "simpletickets.yml",
+        &format!(
+            "roots:\n  - path: {}\n  - path: {}\n",
+            dir.path().display(),
+            ext.display()
+        ),
+    );
+    let api = start(dir.path(), false, SLOW);
+    assert_eq!(api.get("/v1/health").1["status"], "ok");
+    assert_eq!(api.get("/v1/tickets/W").1["blocked"], true);
+
+    let away = ext_parent.path().join("away");
+    std::fs::rename(&ext, &away).unwrap();
+    api.post("/v1/rescan", "");
+    let (_, health) = api.get("/v1/health");
+    assert_eq!(health["status"], "degraded");
+    assert_eq!(health["frozen"], 1);
+    assert_eq!(health["offline_roots"].as_array().unwrap().len(), 1);
+    let (_, doctor) = api.get("/v1/doctor");
+    assert!(doctor["issues"][0].as_str().unwrap().contains("offline"));
+    let (_, x) = api.get("/v1/tickets/X");
+    assert_eq!(x["frozen"], true);
+    assert_eq!(x["status"], "in-progress");
+    assert_eq!(api.get("/v1/tickets/W").1["blocked"], true);
+    let (status, _) = api.patch("/v1/tickets/X", r#"{"status":"done"}"#);
+    assert_eq!(status, 409);
+
+    std::fs::rename(&away, &ext).unwrap();
+    api.post("/v1/rescan", "");
+    assert_eq!(api.get("/v1/health").1["status"], "ok");
+    assert_eq!(api.get("/v1/tickets/X").1["frozen"], false);
+    assert_eq!(api.get("/v1/doctor").1["clean"], true);
+    let (status, _) = api.patch("/v1/tickets/X", r#"{"status":"done"}"#);
+    assert_eq!(status, 200);
+    assert_eq!(api.get("/v1/tickets/W").1["blocked"], false);
+
+    let (_, events) = api.get("/v1/events");
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["type"].as_str())
+        .filter(|t| t.starts_with("root."))
+        .collect();
+    assert_eq!(kinds, ["root.offline", "root.online"]);
+}
+
+#[test]
+fn offline_root_recovers_by_itself_on_the_periodic_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let ext_parent = tempfile::tempdir().unwrap();
+    let ext = ext_parent.path().join("vault");
+    write(&ext, "x.md", &ticket_text("X", "todo", ""));
+    write(
+        dir.path(),
+        "simpletickets.yml",
+        &format!(
+            "roots:\n  - path: {}\n  - path: {}\n",
+            dir.path().display(),
+            ext.display()
+        ),
+    );
+    let away = ext_parent.path().join("away");
+    std::fs::rename(&ext, &away).unwrap();
+    let api = start(dir.path(), false, Duration::from_millis(200));
+    assert!(wait_for(|| api.get("/v1/health").1["status"] == "degraded"));
+    std::fs::rename(&away, &ext).unwrap();
+    assert!(wait_for(|| api.get("/v1/health").1["status"] == "ok"));
+    assert_eq!(api.get("/v1/tickets/X").1["frozen"], false);
+}

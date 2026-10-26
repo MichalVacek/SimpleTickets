@@ -6,7 +6,7 @@
 use crate::config::{Category, Config, RootKind};
 use crate::hash::content_hash;
 use crate::known::{self, KnownEntry};
-use crate::state::known_ids_path;
+use crate::state::{is_within, known_ids_path};
 use crate::ticket::{has_ticket_marker, Ticket};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -60,11 +60,22 @@ pub struct Store {
     known: BTreeMap<String, KnownEntry>,
     /// Set when the record of known IDs could not be read; it is then never rewritten.
     known_error: Option<String>,
+    /// Roots that could not be read, with the reason.
+    offline: BTreeMap<PathBuf, String>,
+    /// Tickets of offline roots, kept from the previous scan and left untouched.
+    frozen: BTreeSet<String>,
 }
 
 impl Store {
     pub fn scan(config: &Config) -> Store {
+        Store::scan_after(config, None)
+    }
+
+    /// Scans all roots. The tickets of a root that cannot be read are kept from
+    /// `previous` and frozen instead of disappearing from the index.
+    pub fn scan_after(config: &Config, previous: Option<&Store>) -> Store {
         let mut problems = Vec::new();
+        let mut offline: BTreeMap<PathBuf, String> = BTreeMap::new();
         let mut files: BTreeMap<PathBuf, RootKind> = BTreeMap::new();
 
         let scan_roots = config
@@ -78,11 +89,8 @@ impl Store {
                     .map(|p| (p.as_path(), RootKind::Tickets)),
             );
         for (root, kind) in scan_roots {
-            if !root.is_dir() {
-                problems.push(ScanProblem::Unreadable {
-                    path: root.to_path_buf(),
-                    message: "root folder does not exist or is not a directory".into(),
-                });
+            if let Err(e) = fs::read_dir(root) {
+                offline.insert(root.to_path_buf(), e.to_string());
                 continue;
             }
             let mut found = Vec::new();
@@ -143,12 +151,27 @@ impl Store {
         }
 
         let mut tickets = BTreeMap::new();
+        let mut frozen = BTreeSet::new();
         let mut duplicates = BTreeMap::new();
         for (id, mut group) in by_id {
             if group.len() == 1 {
                 tickets.insert(id, group.pop().expect("one element"));
             } else {
                 duplicates.insert(id, group.into_iter().map(|t| t.path).collect());
+            }
+        }
+
+        if let Some(previous) = previous {
+            for root in offline.keys() {
+                for (id, entry) in &previous.tickets {
+                    if !tickets.contains_key(id)
+                        && !duplicates.contains_key(id)
+                        && is_within(&entry.path, root)
+                    {
+                        frozen.insert(id.clone());
+                        tickets.insert(id.clone(), entry.clone());
+                    }
+                }
             }
         }
 
@@ -173,6 +196,8 @@ impl Store {
             related_by: BTreeMap::new(),
             known,
             known_error,
+            offline,
+            frozen,
         };
         store.index_links();
         store
@@ -234,6 +259,21 @@ impl Store {
     /// True if `id` is used by at least two files.
     pub fn is_duplicate(&self, id: &str) -> bool {
         self.duplicates.contains_key(id)
+    }
+
+    /// Roots that could not be read, with the reason, ordered by path.
+    pub fn offline_roots(&self) -> &BTreeMap<PathBuf, String> {
+        &self.offline
+    }
+
+    /// True if the ticket belongs to an offline root: its entry is the last known
+    /// one, and no rule or write may touch it.
+    pub fn is_frozen(&self, id: &str) -> bool {
+        self.frozen.contains(id)
+    }
+
+    pub fn frozen_ids(&self) -> &BTreeSet<String> {
+        &self.frozen
     }
 
     /// True if `id` was known earlier and is not in the index now.
@@ -501,10 +541,78 @@ mod tests {
     }
 
     #[test]
-    fn missing_root_is_reported() {
+    fn missing_root_is_offline() {
         let d = tempfile::tempdir().unwrap();
         let config = Config::default_for(&d.path().join("nope"));
-        assert_eq!(Store::scan(&config).problems().len(), 1);
+        let s = Store::scan(&config);
+        assert!(s.problems().is_empty());
+        assert_eq!(s.offline_roots().len(), 1);
+        assert!(s.offline_roots().contains_key(&d.path().join("nope")));
+    }
+
+    fn two_roots(main: &Path, ext: &Path) -> Config {
+        let text = format!(
+            "roots:\n  - path: {}\n  - path: {}\n",
+            main.display(),
+            ext.display()
+        );
+        Config::parse(&text, main).unwrap()
+    }
+
+    #[test]
+    fn offline_root_keeps_last_known_tickets_frozen_and_recovers() {
+        let main = tempfile::tempdir().unwrap();
+        let ext = tempfile::tempdir().unwrap();
+        let ext_path = ext.path().join("vault");
+        write(&ext_path, "x.md", &ticket("X", "in-progress", ""));
+        write(
+            main.path(),
+            "w.md",
+            &ticket("W", "todo", "blocked_by: [X]\n"),
+        );
+        let config = two_roots(main.path(), &ext_path);
+        let before = Store::scan(&config);
+        assert!(before.offline_roots().is_empty());
+        assert!(before.is_blocked("W"));
+
+        let away = ext.path().join("away");
+        fs::rename(&ext_path, &away).unwrap();
+        let during = Store::scan_after(&config, Some(&before));
+        assert_eq!(during.offline_roots().len(), 1);
+        assert!(during.contains("X"));
+        assert!(during.is_frozen("X"));
+        assert!(!during.is_frozen("W"));
+        assert!(during.is_blocked("W"));
+        let again = Store::scan_after(&config, Some(&during));
+        assert!(again.is_frozen("X"));
+
+        fs::rename(&away, &ext_path).unwrap();
+        let after = Store::scan_after(&config, Some(&again));
+        assert!(after.offline_roots().is_empty());
+        assert!(after.frozen_ids().is_empty());
+        assert!(after.contains("X"));
+    }
+
+    #[test]
+    fn offline_root_without_previous_scan_falls_back_to_tombstones() {
+        let main = tempfile::tempdir().unwrap();
+        let ext = tempfile::tempdir().unwrap();
+        let ext_path = ext.path().join("vault");
+        write(&ext_path, "x.md", &ticket("X", "done", ""));
+        write(
+            main.path(),
+            "w.md",
+            &ticket("W", "todo", "blocked_by: [X]\n"),
+        );
+        let config = two_roots(main.path(), &ext_path);
+        let first = Store::scan(&config);
+        first.record_known().unwrap();
+        assert!(!first.is_blocked("W"));
+        fs::rename(&ext_path, ext.path().join("away")).unwrap();
+        let cold = Store::scan(&config);
+        assert!(!cold.contains("X"));
+        assert!(cold.is_tombstoned("X"));
+        assert!(cold.is_blocked("W"));
     }
 
     #[test]

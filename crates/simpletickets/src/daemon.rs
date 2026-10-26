@@ -9,11 +9,13 @@ use simpletickets_core::audit::AuditLog;
 use simpletickets_core::config::{Config, CONFIG_FILE};
 use simpletickets_core::migration::{self, Journal, MigrationError};
 use simpletickets_core::rules::{self, RunOptions};
-use simpletickets_core::state::{audit_log_path, ensure_state_dir, token_path, STATE_DIR};
+use simpletickets_core::state::{
+    audit_log_path, ensure_state_dir, is_within, token_path, STATE_DIR,
+};
 use simpletickets_core::store::Store;
 use simpletickets_core::time::now_timestamp;
 use simpletickets_core::VERSION;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,6 +125,8 @@ impl Events {
 pub struct Inner {
     pub config: Config,
     pub store: Store,
+    /// Offline roots already announced through events.
+    offline_reported: BTreeSet<PathBuf>,
 }
 
 /// State shared between the API workers and the scheduler.
@@ -143,6 +147,8 @@ pub struct ScanOutcome {
     /// Some rule changes were skipped and may succeed later.
     pub retry: bool,
     pub config_changed: bool,
+    /// A root went offline or came back.
+    pub roots_changed: bool,
 }
 
 impl Shared {
@@ -189,7 +195,8 @@ impl Shared {
                 .events
                 .publish("config.invalid", json!({"message": e.to_string()})),
         }
-        let store = Store::scan(&inner.config);
+        let store = Store::scan_after(&inner.config, Some(&inner.store));
+        self.announce_roots(inner, &store, &mut outcome);
         let (store, report) = rules::reconcile(store, Some(&self.audit), RunOptions::default());
         outcome.retry = report.skipped.iter().any(|s| s.retry);
         if outcome.retry {
@@ -205,7 +212,8 @@ impl Shared {
         for change in &report.changes {
             self.events.publish("rule.applied", json!(change));
         }
-        let problems = store.problems().len() + store.duplicates().len();
+        let problems =
+            store.problems().len() + store.duplicates().len() + store.offline_roots().len();
         let summary = json!({
             "reason": reason,
             "tickets": store.tickets().count(),
@@ -222,6 +230,31 @@ impl Shared {
 }
 
 impl Shared {
+    /// Publishes `root.offline` and `root.online` events for roots whose state changed.
+    fn announce_roots(&self, inner: &mut Inner, store: &Store, outcome: &mut ScanOutcome) {
+        let now: BTreeSet<PathBuf> = store.offline_roots().keys().cloned().collect();
+        for root in now.difference(&inner.offline_reported) {
+            let frozen = store
+                .tickets()
+                .filter(|e| store.is_frozen(&e.ticket.id) && is_within(&e.path, root))
+                .count();
+            self.events.publish(
+                "root.offline",
+                json!({
+                    "root": root.display().to_string(),
+                    "message": store.offline_roots()[root],
+                    "frozen": frozen,
+                }),
+            );
+        }
+        for root in inner.offline_reported.difference(&now) {
+            self.events
+                .publish("root.online", json!({"root": root.display().to_string()}));
+        }
+        outcome.roots_changed = now != inner.offline_reported;
+        inner.offline_reported = now;
+    }
+
     /// Plans, journals and applies a migration to the config in `yaml`, then rescans.
     pub fn migrate(&self, inner: &mut Inner, yaml: &str) -> Result<Journal, MigrationError> {
         let journal = migration::begin(&self.dir, &inner.store, yaml)?;
@@ -318,6 +351,7 @@ pub fn start(options: Options) -> Result<Running, String> {
         inner: Mutex::new(Inner {
             store: Store::scan(&config),
             config,
+            offline_reported: BTreeSet::new(),
         }),
     });
     match resumed {
@@ -429,7 +463,7 @@ fn schedule(
         }
         let (_, outcome) = shared.rescan(reason);
         deadline = Instant::now() + if outcome.retry { RETRY_AFTER } else { interval };
-        if outcome.config_changed && watcher.is_some() {
+        if (outcome.config_changed || outcome.roots_changed) && watcher.is_some() {
             watcher = Some(make_watcher(&shared.lock().config, &shared.dir, tx, poll));
         }
     }

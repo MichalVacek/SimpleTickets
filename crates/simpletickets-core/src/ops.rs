@@ -356,6 +356,11 @@ pub fn update(
             OpError::NotFound(format!("no ticket {id}"))
         });
     };
+    if store.is_frozen(id) {
+        return Err(OpError::Conflict(format!(
+            "{id} is frozen: its root is offline"
+        )));
+    }
     let t = &entry.ticket;
     let mut patch = Patch::new();
     if let Some(title) = &update.title {

@@ -1,5 +1,6 @@
 //! Consistency report over a scanned store. Reports problems; never fixes them.
 
+use crate::state::is_within;
 use crate::store::{ScanProblem, Store};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -34,6 +35,13 @@ pub enum Issue {
     },
     /// A ticket in the sub-ticket folder without a parent.
     Orphan { id: String, path: PathBuf },
+    /// A root that cannot be read; its `frozen` tickets keep their last known
+    /// state and no rule touches them.
+    RootOffline {
+        path: PathBuf,
+        message: String,
+        frozen: usize,
+    },
 }
 
 impl fmt::Display for Issue {
@@ -90,6 +98,15 @@ impl fmt::Display for Issue {
             Issue::Orphan { id, path } => {
                 write!(f, "{id}: sub-ticket without parent ({})", path.display())
             }
+            Issue::RootOffline {
+                path,
+                message,
+                frozen,
+            } => write!(
+                f,
+                "{}: root is offline ({message}); {frozen} ticket(s) frozen at their last known state",
+                path.display()
+            ),
         }
     }
 }
@@ -135,6 +152,18 @@ pub fn check(store: &Store) -> Report {
                 path: path.clone(),
                 message: message.clone(),
             },
+        });
+    }
+
+    for (path, message) in store.offline_roots() {
+        let frozen = store
+            .tickets()
+            .filter(|e| store.is_frozen(&e.ticket.id) && is_within(&e.path, path))
+            .count();
+        issues.push(Issue::RootOffline {
+            path: path.clone(),
+            message: message.clone(),
+            frozen,
         });
     }
 
@@ -397,6 +426,29 @@ mod tests {
         assert!(cycles.contains(&("blocked_by", vec!["A".into(), "B".into(), "C".into()])));
         assert!(cycles.contains(&("blocked_by", vec!["S".into()])));
         assert!(cycles.contains(&("parent", vec!["S".into()])));
+    }
+
+    #[test]
+    fn reports_offline_roots_with_frozen_count() {
+        let main = tempfile::tempdir().unwrap();
+        let ext = tempfile::tempdir().unwrap();
+        let ext_path = ext.path().join("vault");
+        write(&ext_path, "x.md", &ticket("X", "todo", ""));
+        let text = format!(
+            "roots:\n  - path: {}\n  - path: {}\n",
+            main.path().display(),
+            ext_path.display()
+        );
+        let config = Config::parse(&text, main.path()).unwrap();
+        let before = Store::scan(&config);
+        assert!(check(&before).is_clean());
+        std::fs::rename(&ext_path, ext.path().join("away")).unwrap();
+        let r = check(&Store::scan_after(&config, Some(&before)));
+        assert!(r
+            .issues
+            .iter()
+            .any(|i| matches!(i, Issue::RootOffline { path, frozen: 1, .. } if *path == ext_path)));
+        assert!(r.to_string().contains("offline"));
     }
 
     #[test]

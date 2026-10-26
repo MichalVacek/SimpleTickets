@@ -172,11 +172,22 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
             let update = shared
                 .available_update()
                 .map(|r| json!({"latest": r.tag, "url": r.url}));
+            let offline: Vec<Value> = inner
+                .store
+                .offline_roots()
+                .iter()
+                .map(|(path, message)| {
+                    json!({"root": path.display().to_string(), "message": message})
+                })
+                .collect();
             reply(
                 200,
                 json!({
                     "version": simpletickets_core::VERSION,
+                    "status": if offline.is_empty() { "ok" } else { "degraded" },
                     "tickets": inner.store.tickets().count(),
+                    "frozen": inner.store.frozen_ids().len(),
+                    "offline_roots": offline,
                     "update": update,
                 }),
             )

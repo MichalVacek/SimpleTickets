@@ -90,6 +90,9 @@ pub fn plan(store: &Store) -> Plan {
 
     for entry in store.tickets() {
         let id = &entry.ticket.id;
+        if store.is_frozen(id) {
+            continue;
+        }
         let own = store.own_category(id);
 
         if own == Some(Category::InProgress) {
@@ -105,6 +108,7 @@ pub fn plan(store: &Store) -> Plan {
 
         if store.children_of(id).is_empty()
             || store.effective_category(id) != Some(Category::InProgress)
+            || store.children_of(id).iter().any(|c| store.is_frozen(c))
         {
             continue;
         }
@@ -199,7 +203,7 @@ pub fn reconcile(
         if applied == 0 {
             break;
         }
-        store = Store::scan(store.config());
+        store = Store::scan_after(store.config(), Some(&store));
     }
     if let Err(e) = store.record_known() {
         report.state_error = Some(format!("known IDs: {e}"));
@@ -357,6 +361,43 @@ mod tests {
         ]);
         let (_, report) = reconcile(Store::scan(&config), None, NOW);
         assert!(report.changes.is_empty());
+    }
+
+    #[test]
+    fn frozen_tickets_and_their_parents_are_left_alone() {
+        let main = tempfile::tempdir().unwrap();
+        let ext = tempfile::tempdir().unwrap();
+        let ext_path = ext.path().join("vault");
+        write(main.path(), "p.md", &ticket("P", "todo", ""));
+        write(
+            &ext_path,
+            "c.md",
+            &ticket("C", "in-progress", "parent: P\n"),
+        );
+        write(&ext_path, "q.md", &ticket("Q", "todo", ""));
+        write(
+            main.path(),
+            "d.md",
+            &ticket("D", "in-progress", "parent: Q\n"),
+        );
+        let text = format!(
+            "roots:\n  - path: {}\n  - path: {}\n",
+            main.path().display(),
+            ext_path.display()
+        );
+        let config = Config::parse(&text, main.path()).unwrap();
+        let before = Store::scan(&config);
+        std::fs::rename(&ext_path, ext.path().join("away")).unwrap();
+        let during = Store::scan_after(&config, Some(&before));
+        let plan = plan(&during);
+        // P's only child C is frozen; Q is frozen itself. Neither is touched.
+        assert!(plan.changes.is_empty(), "{plan:?}");
+        assert!(plan.warnings.is_empty());
+        let (store, report) = reconcile(during, None, NOW);
+        assert!(report.changes.is_empty());
+        assert_eq!(status_of(&store, "P"), "todo");
+        assert_eq!(status_of(&store, "Q"), "todo");
+        assert!(store.is_frozen("Q"));
     }
 
     #[test]
