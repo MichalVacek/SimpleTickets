@@ -291,10 +291,14 @@ impl Manifest {
             }
         }
         if let Some(dir) = &raw.working_dir {
-            let escapes = dir
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir));
-            if dir.is_absolute() || escapes {
+            use std::path::Component;
+            let leaves_folder = dir.components().any(|c| {
+                matches!(
+                    c,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            });
+            if leaves_folder {
                 return Err(
                     "working_dir must be relative to the plugin folder, without `..`".into(),
                 );
