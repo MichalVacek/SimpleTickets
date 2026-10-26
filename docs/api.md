@@ -201,3 +201,57 @@ Ticket events are produced by comparing the ticket index before and after every 
 Within one scan the order is: `config.*`, `migration.suggested`, `root.*`, the ticket events found in the files as they were scanned (`source` `api` or `scan`), `rule.applied` and the ticket events caused by rules (`source` `rule`), `warning.raised`, `state.error`, then `scan`.
 
 New event types and new payload fields can appear in any `v1` release; clients ignore types and fields they do not know.
+
+## Webhooks
+
+The daemon can POST events to HTTP endpoints, so a tool can react without polling. Webhooks are configured in `simpletickets.yml`; they are delivered by the daemon on separate threads, so a slow, failing or unreachable receiver never delays the API, the scans or the rules.
+
+```yaml
+webhooks:
+  - url: http://127.0.0.1:9000/simpletickets
+    events: ["ticket.*", "rule.applied"]
+    secret_env: SIMPLETICKETS_WEBHOOK_SECRET
+```
+
+| Key | Meaning |
+|---|---|
+| `url` | Required. `http` or `https`; any other scheme is a config error. Loopback, private-network and `localhost` targets are allowed, since this is a local tool. Credentials in the URL are never logged |
+| `events` | Event type globs: `*` matches any run of characters (dots included), `?` one character. `["*"]` when left out. An event is sent when any glob matches its `type` |
+| `secret_env` | Optional. The name of an environment variable (letters, digits, underscore) that holds the signing secret. The secret itself is never stored in the config and never appears in `GET /v1/config` |
+
+The list is read again on every config change, `PUT /v1/config` included, and applies to the next event. The daemon needs the variable in its own environment; for a launchd, systemd or Docker run, set it there.
+
+### Delivery
+
+Each matching event is sent as `POST` to the URL with the [event envelope](#envelope) as the JSON body, exactly as `GET /v1/events` shows it. A webhook sees every event of the daemon run, starting with the startup scan.
+
+| Header | Value |
+|---|---|
+| `Content-Type` | `application/json` |
+| `User-Agent` | `simpletickets/<version>` |
+| `X-SimpleTickets-Api-Version` | `1` |
+| `X-SimpleTickets-Event` | The event `type` |
+| `X-SimpleTickets-Delivery` | `<stream>-<seq>`, the same for every retry of one event |
+| `X-SimpleTickets-Timestamp` | Unix time in seconds when this attempt was made |
+| `X-SimpleTickets-Signature` | `sha256=<hex>`, only when `secret_env` is set |
+
+Any `2xx` answer is success. Anything else, a timeout (10 seconds per attempt) or a connection error is a failure, and redirects are not followed.
+
+### Signature
+
+The signature is the lower-case hex HMAC-SHA256, keyed with the secret, of the string `<timestamp>.<body>`: the value of `X-SimpleTickets-Timestamp`, a dot and the raw request body bytes. A receiver recomputes it over the body it received, compares in constant time, and should refuse requests whose timestamp is more than a few minutes old to limit replays.
+
+```python
+import hmac, hashlib
+expected = "sha256=" + hmac.new(secret, timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+ok = hmac.compare_digest(expected, signature_header)
+```
+
+If `secret_env` names a variable that is unset or empty when an event is due, the delivery is dropped and an error is logged. Nothing is ever sent unsigned for a webhook that has a secret configured.
+
+### Retries and guarantees
+
+- A failed attempt is retried after 1 s, then 2 s, 4 s, 8 s and 16 s (doubling, capped at 30 s): 6 attempts in all. After the last one the event is dropped and the failure is logged at `error`. Every failed attempt is logged at `warn`.
+- Each webhook has its own queue and its own sender, so events reach one receiver in `seq` order and one dead receiver does not hold up another. While an event is being retried, later events for the same webhook wait behind it.
+- At least once: a receiver can see the same event more than once (a retry after it processed the request but answered late). It deduplicates on `X-SimpleTickets-Delivery`.
+- Not durable: queues are in memory (up to 1000 events per webhook, then new events for that webhook are dropped and logged) and are lost when the daemon stops. A receiver that must not miss anything follows `GET /v1/events` and resyncs on a gap instead, or uses webhooks only as a wake-up.

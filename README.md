@@ -152,6 +152,19 @@ The daemon scans all folders on startup, watches them for changes, rescans perio
 | `GET /v1/audit?limit=N` | automatic changes |
 | `GET /v1/templates` | template names |
 
+## Webhooks
+
+`simpletickets.yml` can list outgoing webhooks. Matching events are POSTed as JSON with an HMAC-SHA256 signature; the secret is read from the environment variable named by `secret_env`, never stored in the config.
+
+```yaml
+webhooks:
+  - url: http://127.0.0.1:9000/simpletickets
+    events: ["ticket.*", "rule.applied"]    # globs; default ["*"]
+    secret_env: SIMPLETICKETS_WEBHOOK_SECRET
+```
+
+Only `http` and `https` URLs are accepted; local and private addresses are fine. Failed deliveries are retried with a capped backoff (1 s doubling to 30 s, six attempts), logged, and never delay the API or the rules. Headers, signature verification and delivery guarantees are in [docs/api.md](docs/api.md#webhooks).
+
 ## Search
 
 Search covers ticket titles and Markdown bodies (other frontmatter keys are not searched; use the list filters for those). The files stay the source of truth: the daemon and the CLI build an in-memory inverted index on every scan and discard it with the scan, so results are as fresh as the last scan and nothing extra is stored on disk.

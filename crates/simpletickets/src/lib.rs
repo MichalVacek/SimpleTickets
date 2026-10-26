@@ -7,3 +7,4 @@ pub mod events;
 pub mod logger;
 pub mod token;
 pub mod update;
+pub mod webhooks;

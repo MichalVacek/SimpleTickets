@@ -5,6 +5,7 @@ use crate::events::{self, Events};
 use crate::logger::Logger;
 use crate::token;
 use crate::update::{self, Release, UpdateCheck};
+use crate::webhooks::{self, Backoff};
 use notify::{PollWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
@@ -54,6 +55,8 @@ pub struct Options {
     pub lease_ttl: Duration,
     /// How many events the stream keeps for clients that poll late.
     pub event_backlog: usize,
+    /// Retry policy for webhook deliveries.
+    pub webhook_backoff: Backoff,
     pub logger: Arc<Logger>,
 }
 
@@ -70,6 +73,7 @@ impl Options {
             update_check: None,
             lease_ttl: lease::DEFAULT_TTL,
             event_backlog: events::DEFAULT_BACKLOG,
+            webhook_backoff: Backoff::default(),
             logger: Arc::new(Logger::discard()),
         }
     }
@@ -423,6 +427,10 @@ pub fn start(options: Options) -> Result<Running, String> {
         threads.push(thread::spawn(move || {
             schedule(&shared, &rx, &tx, interval, watch, poll)
         }));
+    }
+    {
+        let (shared, backoff) = (shared.clone(), options.webhook_backoff);
+        threads.push(thread::spawn(move || webhooks::run(&shared, backoff)));
     }
     {
         let (shared, ttl) = (shared.clone(), options.lease_ttl);

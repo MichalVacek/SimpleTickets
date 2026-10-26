@@ -64,6 +64,18 @@ pub struct Root {
     pub kind: RootKind,
 }
 
+/// An outgoing webhook: events whose type matches one of the globs are POSTed to `url`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Webhook {
+    /// An `http` or `https` URL.
+    pub url: String,
+    /// Event type globs (`*` any run of characters, `?` one character).
+    pub events: Vec<String>,
+    /// Name of the environment variable holding the signing secret; the secret itself
+    /// is never part of the config.
+    pub secret_env: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -110,6 +122,7 @@ pub struct Config {
     /// The review status (lower case); always an in-progress status.
     review_status: String,
     pub finished_parent: FinishedParent,
+    pub webhooks: Vec<Webhook>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -139,6 +152,16 @@ struct RawConfig {
     ready_for_review: Option<bool>,
     review_status: Option<String>,
     subticket_under_finished_parent: Option<FinishedParent>,
+    #[serde(default)]
+    webhooks: Vec<RawWebhook>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWebhook {
+    url: String,
+    events: Option<Vec<String>>,
+    secret_env: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +191,7 @@ impl Config {
             ready_for_review: false,
             review_status: DEFAULT_REVIEW_STATUS.into(),
             finished_parent: FinishedParent::default(),
+            webhooks: Vec::new(),
         }
     }
 
@@ -268,6 +292,12 @@ impl Config {
             }
         }
 
+        let webhooks = raw
+            .webhooks
+            .into_iter()
+            .map(build_webhook)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Config {
             dir: dir.to_path_buf(),
             id_prefix,
@@ -281,6 +311,7 @@ impl Config {
             ready_for_review: enabled,
             review_status,
             finished_parent: raw.subticket_under_finished_parent.unwrap_or_default(),
+            webhooks,
         })
     }
 
@@ -339,6 +370,11 @@ impl Config {
                 FinishedParent::Reopen => "reopen",
                 FinishedParent::Refuse => "refuse",
             },
+            "webhooks": self.webhooks.iter().map(|w| serde_json::json!({
+                "url": w.url,
+                "events": w.events,
+                "secret_env": w.secret_env,
+            })).collect::<Vec<_>>(),
         })
     }
 
@@ -365,6 +401,52 @@ pub fn write_file(dir: &Path, text: &str) -> std::io::Result<()> {
 
 fn invalid<T>(message: String) -> Result<T, ConfigError> {
     Err(ConfigError::Invalid(message))
+}
+
+/// True for an `http://` or `https://` URL with a host.
+fn is_http_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let Some(rest) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("");
+    !host.is_empty() && !host.starts_with(':') && !url.chars().any(char::is_whitespace)
+}
+
+fn build_webhook(raw: RawWebhook) -> Result<Webhook, ConfigError> {
+    let url = raw.url.trim().to_string();
+    if !is_http_url(&url) {
+        return invalid(format!(
+            "webhook url `{url}` must be an http:// or https:// URL"
+        ));
+    }
+    let events = raw.events.unwrap_or_else(|| vec!["*".to_string()]);
+    if events.is_empty() || events.iter().any(|e| e.trim().is_empty()) {
+        return invalid(format!(
+            "webhook {url}: `events` needs at least one non-empty pattern"
+        ));
+    }
+    if let Some(name) = &raw.secret_env {
+        let mut chars = name.chars();
+        let valid = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return invalid(format!(
+                "webhook {url}: secret_env `{name}` is not an environment variable name"
+            ));
+        }
+    }
+    Ok(Webhook {
+        url,
+        events: events.into_iter().map(|e| e.trim().to_string()).collect(),
+        secret_env: raw.secret_env,
+    })
 }
 
 fn default_statuses() -> BTreeMap<String, Category> {
@@ -560,5 +642,43 @@ cancelled_unblocks: false\n",
         assert_eq!(Config::load_from_dir(dir.path()).unwrap().id_prefix, "AB");
         std::fs::write(dir.path().join(CONFIG_FILE), "id_prefix: [\n").unwrap();
         assert!(Config::load_from_dir(dir.path()).is_err());
+    }
+
+    #[test]
+    fn parses_webhooks() {
+        let c = parse(
+            "webhooks:\n  - url: http://127.0.0.1:9000/hook\n    events: [\"ticket.*\"]\n    secret_env: ST_SECRET\n  - url: HTTPS://example.org/x\n",
+        )
+        .unwrap();
+        assert_eq!(c.webhooks.len(), 2);
+        assert_eq!(c.webhooks[0].events, ["ticket.*"]);
+        assert_eq!(c.webhooks[0].secret_env.as_deref(), Some("ST_SECRET"));
+        assert_eq!(c.webhooks[1].events, ["*"]);
+        assert!(c.webhooks[1].secret_env.is_none());
+        assert_eq!(
+            c.to_json()["webhooks"][0]["url"],
+            "http://127.0.0.1:9000/hook"
+        );
+        assert!(parse("").unwrap().webhooks.is_empty());
+    }
+
+    #[test]
+    fn rejects_bad_webhooks() {
+        for url in [
+            "ftp://example.org/x",
+            "file:///etc/passwd",
+            "example.org/x",
+            "http://",
+            "http:///path",
+            "javascript:alert(1)",
+        ] {
+            let msg = invalid_msg(&format!("webhooks:\n  - url: \"{url}\"\n"));
+            assert!(msg.contains("http:// or https://"), "{url}: {msg}");
+        }
+        let msg = invalid_msg("webhooks:\n  - url: http://h/\n    secret_env: \"1BAD\"\n");
+        assert!(msg.contains("environment variable name"), "{msg}");
+        let msg = invalid_msg("webhooks:\n  - url: http://h/\n    events: []\n");
+        assert!(msg.contains("events"), "{msg}");
+        assert!(parse("webhooks:\n  - url: http://h/\n    secret: x\n").is_err());
     }
 }
