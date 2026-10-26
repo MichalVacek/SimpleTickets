@@ -613,3 +613,86 @@ fn offline_root_recovers_by_itself_on_the_periodic_scan() {
     assert!(wait_for(|| api.get("/v1/health").1["status"] == "ok"));
     assert_eq!(api.get("/v1/tickets/X").1["frozen"], false);
 }
+
+#[test]
+fn only_one_daemon_runs_per_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = start(dir.path(), false, SLOW);
+    let err = match simpletickets::daemon::start(simpletickets::daemon::Options::new(
+        dir.path().to_path_buf(),
+    )) {
+        Ok(_) => panic!("second daemon must not start"),
+        Err(e) => e,
+    };
+    assert!(err.contains("already runs the rules"), "{err}");
+    assert!(dir.path().join(".simpletickets/daemon.lock").exists());
+    assert_eq!(first.get("/v1/health").1["rules_enabled"], true);
+
+    drop(first);
+    assert!(!dir.path().join(".simpletickets/daemon.lock").exists());
+    let again = start(dir.path(), false, SLOW);
+    assert_eq!(again.get("/v1/health").0, 200);
+}
+
+#[test]
+fn stale_lock_of_a_dead_daemon_is_taken_over() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        ".simpletickets/daemon.lock",
+        r#"{"pid":999999,"owner":"gone","started":"2026-01-01T00:00:00Z","heartbeat_ms":1000}"#,
+    );
+    let api = start(dir.path(), false, SLOW);
+    assert_eq!(api.get("/v1/health").1["rules_enabled"], true);
+    let lock = std::fs::read_to_string(dir.path().join(".simpletickets/daemon.lock")).unwrap();
+    assert!(lock.contains(&std::process::id().to_string()));
+}
+
+#[test]
+fn heartbeat_keeps_the_lease_and_loss_switches_rules_off() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "p.md", &ticket_text("P", "todo", ""));
+    write(
+        dir.path(),
+        "c.md",
+        &ticket_text("C", "in-progress", "parent: P\n"),
+    );
+    let lock = dir.path().join(".simpletickets/daemon.lock");
+    let api = start_with(dir.path(), false, SLOW, |o| {
+        o.lease_ttl = Duration::from_millis(600);
+    });
+    // The heartbeat outlives several time-to-live periods.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(api.get("/v1/health").1["rules_enabled"], true);
+    assert!(simpletickets::daemon::start({
+        let mut o = simpletickets::daemon::Options::new(dir.path().to_path_buf());
+        o.lease_ttl = Duration::from_millis(600);
+        o
+    })
+    .is_err());
+
+    // Another daemon takes the lease over: rules stop until it is gone.
+    std::fs::write(
+        &lock,
+        format!(
+            r#"{{"pid":1,"owner":"other","started":"x","heartbeat_ms":{}}}"#,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                + 3_000
+        ),
+    )
+    .unwrap();
+    assert!(wait_for(
+        || api.get("/v1/health").1["rules_enabled"] == false
+    ));
+    let (_, events) = api.get("/v1/events");
+    assert!(events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "lease.lost"));
+    std::fs::remove_file(&lock).unwrap();
+    assert!(wait_for(|| api.get("/v1/health").1["rules_enabled"] == true));
+}

@@ -187,6 +187,7 @@ pub fn handle(shared: &Shared, req: &Request) -> Reply {
                     "status": if offline.is_empty() { "ok" } else { "degraded" },
                     "tickets": inner.store.tickets().count(),
                     "frozen": inner.store.frozen_ids().len(),
+                    "rules_enabled": shared.rules_enabled(),
                     "offline_roots": offline,
                     "update": update,
                 }),

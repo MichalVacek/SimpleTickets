@@ -7,6 +7,7 @@ use notify::{PollWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
 use simpletickets_core::audit::AuditLog;
 use simpletickets_core::config::{Config, CONFIG_FILE};
+use simpletickets_core::lease::{self, Lease};
 use simpletickets_core::migration::{self, Journal, MigrationError};
 use simpletickets_core::rules::{self, RunOptions};
 use simpletickets_core::state::{
@@ -48,6 +49,8 @@ pub struct Options {
     pub poll_interval: Option<Duration>,
     /// Periodic check for a newer release; `None` disables it.
     pub update_check: Option<UpdateCheck>,
+    /// Heartbeat age after which another daemon may take over this folder's lease.
+    pub lease_ttl: Duration,
 }
 
 impl Options {
@@ -61,6 +64,7 @@ impl Options {
             watch: true,
             poll_interval: None,
             update_check: None,
+            lease_ttl: lease::DEFAULT_TTL,
         }
     }
 }
@@ -139,6 +143,8 @@ pub struct Shared {
     inner: Mutex<Inner>,
     scheduler: Mutex<Option<Sender<Message>>>,
     update: Mutex<Option<Release>>,
+    /// The lease that entitles this daemon to run the rules; `None` after it was lost.
+    lease: Mutex<Option<Lease>>,
 }
 
 /// What a rescan found, for callers that schedule follow-ups.
@@ -162,6 +168,18 @@ impl Shared {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// True while this daemon holds the lease and so may run the rules.
+    pub fn rules_enabled(&self) -> bool {
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    fn release_lease(&self) {
+        *self.lease.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -197,7 +215,11 @@ impl Shared {
         }
         let store = Store::scan_after(&inner.config, Some(&inner.store));
         self.announce_roots(inner, &store, &mut outcome);
-        let (store, report) = rules::reconcile(store, Some(&self.audit), RunOptions::default());
+        let (store, report) = if self.rules_enabled() {
+            rules::reconcile(store, Some(&self.audit), RunOptions::default())
+        } else {
+            (store, rules::RunReport::default())
+        };
         outcome.retry = report.skipped.iter().any(|s| s.retry);
         if outcome.retry {
             if let Some(tx) = self
@@ -219,6 +241,7 @@ impl Shared {
             "tickets": store.tickets().count(),
             "problems": problems,
             "rules": report,
+            "rules_enabled": self.rules_enabled(),
         });
         self.events.publish(
             "scan",
@@ -315,6 +338,7 @@ impl Running {
         for t in self.threads {
             let _ = t.join();
         }
+        self.shared.release_lease();
     }
 
     /// Blocks until the daemon is stopped.
@@ -331,6 +355,7 @@ pub fn start(options: Options) -> Result<Running, String> {
         .canonicalize()
         .map_err(|e| format!("{}: {e}", options.dir.display()))?;
     ensure_state_dir(&dir).map_err(|e| format!("cannot create state folder: {e}"))?;
+    let lease = Lease::acquire(&dir, options.lease_ttl).map_err(|e| e.to_string())?;
     let resumed = migration::resume(&dir, migration::RunOptions::default());
     let config = Config::load_from_dir(&dir).map_err(|e| e.to_string())?;
     let token_file = options
@@ -348,6 +373,7 @@ pub fn start(options: Options) -> Result<Running, String> {
         token,
         scheduler: Mutex::new(None),
         update: Mutex::new(None),
+        lease: Mutex::new(Some(lease)),
         inner: Mutex::new(Inner {
             store: Store::scan(&config),
             config,
@@ -394,6 +420,10 @@ pub fn start(options: Options) -> Result<Running, String> {
             schedule(&shared, &rx, &tx, interval, watch, poll)
         }));
     }
+    {
+        let (shared, ttl) = (shared.clone(), options.lease_ttl);
+        threads.push(thread::spawn(move || keep_lease(&shared, ttl)));
+    }
     if let Some(check) = options.update_check.clone() {
         let shared = shared.clone();
         threads.push(thread::spawn(move || run_update_checks(&shared, &check)));
@@ -405,6 +435,37 @@ pub fn start(options: Options) -> Result<Running, String> {
         tx,
         threads,
     })
+}
+
+/// Refreshes the lease heartbeat until the daemon stops. A lease taken over by
+/// another daemon switches the rules off; it is taken back once that daemon is gone.
+fn keep_lease(shared: &Shared, ttl: Duration) {
+    let interval = (ttl / 3).max(Duration::from_millis(50));
+    while !shared.stop.load(Ordering::Relaxed) {
+        let deadline = Instant::now() + interval;
+        while Instant::now() < deadline && !shared.stop.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(25).min(interval));
+        }
+        if shared.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut slot = shared.lease.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.as_ref().map(Lease::renew) {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                *slot = None;
+                shared
+                    .events
+                    .publish("lease.lost", json!({"message": e.to_string()}));
+            }
+            None => {
+                if let Ok(lease) = Lease::acquire(&shared.dir, ttl) {
+                    *slot = Some(lease);
+                    shared.events.publish("lease.acquired", json!({}));
+                }
+            }
+        }
+    }
 }
 
 /// Checks at startup and then every interval until the daemon stops.

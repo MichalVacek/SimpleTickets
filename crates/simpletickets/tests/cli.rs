@@ -227,3 +227,28 @@ fn forget_releases_tickets_blocked_by_a_deleted_ticket() {
     let out = String::from_utf8(st(d, &["doctor"]).stdout).unwrap();
     assert!(out.contains("points to missing ticket") && !out.contains("tombstone"));
 }
+
+#[test]
+fn cli_commands_work_while_a_daemon_runs_but_a_second_daemon_is_refused() {
+    use simpletickets::daemon::{self, Options};
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let mut options = Options::new(d.to_path_buf());
+    options.port = 0;
+    options.watch = false;
+    let running = daemon::start(options).unwrap();
+
+    let id = create_id(d, &["While the daemon runs"]);
+    ok(d, &["set-status", &id, "in-progress"]);
+    assert!(ok(d, &["show", &id]).contains("in-progress"));
+    ok(d, &["rescan"]);
+
+    let out = st(d, &["daemon", "--port", "0", "--no-update-check"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("another daemon") && err.contains("already runs"),
+        "{err}"
+    );
+    running.stop();
+}
