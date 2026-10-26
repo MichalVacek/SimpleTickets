@@ -1,5 +1,6 @@
 //! Core library for SimpleTickets: ticket model, configuration and store.
 
+pub mod config;
 pub mod frontmatter;
 pub mod id;
 pub mod ticket;

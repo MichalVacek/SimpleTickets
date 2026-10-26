@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
 serde_yaml_ng = "0.10.0"
 sha2 = "0.10.9"
 thiserror = "2.0.21"
