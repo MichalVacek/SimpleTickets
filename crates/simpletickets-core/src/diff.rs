@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(kinds(&changes), ["ticket.moved", "ticket.updated"]);
         let moved = changes[0].data("scan");
         assert!(moved["from"].as_str().unwrap().ends_with("a.md"));
-        assert!(moved["to"].as_str().unwrap().ends_with("sub/a.md"));
+        assert!(Path::new(moved["to"].as_str().unwrap()).ends_with("sub/a.md"));
         let updated = changes[1].data("scan");
         assert_eq!(updated["body_changed"], true);
         assert!(updated["changes"].as_object().unwrap().is_empty());
