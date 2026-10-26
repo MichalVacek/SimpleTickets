@@ -7,6 +7,7 @@ pub mod hash;
 pub mod id;
 pub mod store;
 pub mod ticket;
+pub mod write;
 
 /// Crate version, as declared in the manifest.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
