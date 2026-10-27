@@ -12,6 +12,8 @@ to see the plan; nothing is changed in that mode.
 .PARAMETER TicketsDir   Tickets folder the daemon manages (default: ~\SimpleTickets).
 .PARAMETER Port         Daemon port on 127.0.0.1 (default: 7878).
 .PARAMETER Addons       Comma-separated addons to install, or "none" (default: ask).
+.PARAMETER PluginsDir   Where addon manifests are installed for the daemon to find
+                        (default: $env:SIMPLETICKETS_PLUGINS_DIR or %APPDATA%\simpletickets\plugins).
 .PARAMETER FromSource   Build with cargo from this checkout.
 .PARAMETER FromRelease  Download the latest release archive.
 .PARAMETER NoService    Do not register the scheduled task.
@@ -25,6 +27,7 @@ param(
     [string]$TicketsDir = (Join-Path $HOME 'SimpleTickets'),
     [int]$Port = 7878,
     [string]$Addons = '',
+    [string]$PluginsDir = $(if ($env:SIMPLETICKETS_PLUGINS_DIR) { $env:SIMPLETICKETS_PLUGINS_DIR } else { Join-Path $env:APPDATA 'simpletickets\plugins' }),
     [switch]$FromSource,
     [switch]$FromRelease,
     [switch]$NoService,
@@ -38,14 +41,46 @@ $ErrorActionPreference = 'Stop'
 $Repo = 'MichalVacek/SimpleTickets'
 $TaskName = 'SimpleTickets'
 
-# Addons: Name, Crate, Binary, Description. Add an entry to offer another addon.
-$AddonList = @(
-    @{ Name = 'mcp'; Crate = 'simpletickets-mcp'; Binary = 'simpletickets-mcp'; Description = 'MCP server so a client can list, create and update tickets' }
-    @{ Name = 'ui'; Crate = 'simpletickets-ui'; Binary = 'simpletickets-ui'; Description = 'Kanban board in the browser, served on 127.0.0.1' }
-    @{ Name = 'sync'; Crate = 'simpletickets-sync'; Binary = 'simpletickets-sync'; Description = 'Synchronization to other trackers through connector plugins' }
-    @{ Name = 'connector-archive'; Crate = 'simpletickets-connector-archive'; Binary = 'simpletickets-connector-archive'; Description = 'Sync connector writing one file per ticket to a folder' }
-    @{ Name = 'connector-jira'; Crate = 'simpletickets-connector-jira'; Binary = 'simpletickets-connector-jira'; Description = 'Sync connector for Jira Cloud (unverified against a live site)' }
-)
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+
+# Strips surrounding whitespace and one pair of quotes from a YAML scalar.
+function Get-YamlValue([string]$Text) {
+    return ($Text.Trim() -replace '^["'']|["'']$', '')
+}
+
+# Reads a plugin manifest's top-level name and description and its install block
+# (package, binary) line by line. Returns $null when the manifest has no install block.
+function Read-ManifestAddon([string]$Path) {
+    $name = ''; $description = ''; $package = ''; $binary = ''
+    $inInstall = $false
+    foreach ($line in Get-Content $Path) {
+        if ($line -match '^[A-Za-z_]') { $inInstall = $line -match '^install:' }
+        if ($line -match '^name:(.*)$') { $name = Get-YamlValue $Matches[1] }
+        elseif ($line -match '^description:(.*)$') { $description = Get-YamlValue $Matches[1] }
+        elseif ($inInstall -and $line -match '^\s+package:(.*)$') { $package = Get-YamlValue $Matches[1] }
+        elseif ($inInstall -and $line -match '^\s+binary:(.*)$') { $binary = Get-YamlValue $Matches[1] }
+    }
+    if ($name -eq '' -or $package -eq '' -or $binary -eq '') { return $null }
+    return @{ Name = $name; Crate = $package; Binary = $binary; Description = $description; Manifest = $Path }
+}
+
+# Addons come from the plugin manifests in this checkout (plugins\*\plugin.yml): every
+# manifest with an install block is offered. Without a checkout the built-in entry is used
+# and manifests come from the release archive.
+function Get-AddonList {
+    $found = @()
+    $manifests = Get-ChildItem -Path (Join-Path $RepoRoot 'plugins') -Filter 'plugin.yml' -Recurse -Depth 1 -ErrorAction SilentlyContinue
+    foreach ($manifest in $manifests) {
+        $addon = Read-ManifestAddon $manifest.FullName
+        if ($addon) { $found += $addon }
+    }
+    if ($found.Count -eq 0) {
+        $found = @(@{ Name = 'mcp'; Crate = 'simpletickets-mcp'; Binary = 'simpletickets-mcp'; Description = 'MCP server so a client can list, create and update tickets'; Manifest = '' })
+    }
+    return $found
+}
+
+$AddonList = @(Get-AddonList)
 
 function Confirm-Default([string]$Prompt, [bool]$Default) {
     if ($Yes -or $DryRun -or -not [Environment]::UserInteractive) { return $Default }
@@ -81,6 +116,33 @@ function Get-ReleaseAsset {
     return 'simpletickets-x86_64-pc-windows-msvc.zip'
 }
 
+# Copies the manifests of the selected addons into PluginsDir so the daemon finds them.
+# $ReleaseDir: folder of an extracted release archive, used when an addon has no checkout manifest.
+function Install-Manifests($Selected, [string]$ReleaseDir) {
+    foreach ($addon in $Selected) {
+        $manifest = $addon.Manifest
+        if (-not $manifest -and $ReleaseDir) {
+            $candidate = Join-Path $ReleaseDir "plugins\$($addon.Name)\plugin.yml"
+            if (Test-Path $candidate) { $manifest = $candidate }
+        }
+        $target = Join-Path $PluginsDir $addon.Name
+        if (-not $manifest) {
+            if ($DryRun) {
+                Write-Host "would install the manifest of '$($addon.Name)' into $target"
+            } else {
+                Write-Host "note: no manifest found for addon '$($addon.Name)'; the daemon will not list it"
+            }
+            continue
+        }
+        if ($DryRun) {
+            Write-Host "would copy $manifest to $target\plugin.yml"
+        } else {
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+            Copy-Item $manifest (Join-Path $target 'plugin.yml') -Force
+        }
+    }
+}
+
 function Install-Binaries([string[]]$Names, $Selected, [string]$Mode, [string]$RepoRoot, [string]$BinDir) {
     if ($Mode -eq 'source') {
         $cargoArgs = @('build', '--release', '--manifest-path', (Join-Path $RepoRoot 'Cargo.toml'), '-p', 'simpletickets')
@@ -88,6 +150,7 @@ function Install-Binaries([string[]]$Names, $Selected, [string]$Mode, [string]$R
         if ($DryRun) {
             Write-Host "would run: cargo $($cargoArgs -join ' ')"
             foreach ($name in $Names) { Write-Host "would copy target\release\$name.exe to $BinDir" }
+            Install-Manifests $Selected ''
             return
         }
         & cargo @cargoArgs
@@ -95,6 +158,7 @@ function Install-Binaries([string[]]$Names, $Selected, [string]$Mode, [string]$R
         foreach ($name in $Names) {
             Copy-Item (Join-Path $RepoRoot "target\release\$name.exe") (Join-Path $BinDir "$name.exe") -Force
         }
+        Install-Manifests $Selected ''
         return
     }
 
@@ -102,6 +166,7 @@ function Install-Binaries([string[]]$Names, $Selected, [string]$Mode, [string]$R
     $base = "https://github.com/$Repo/releases/latest/download"
     if ($DryRun) {
         Write-Host "would download $base/$asset, verify it against $base/SHA256SUMS and install: $($Names -join ' ')"
+        Install-Manifests $Selected ''
         return
     }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("simpletickets-" + [Guid]::NewGuid())
@@ -125,6 +190,7 @@ function Install-Binaries([string[]]$Names, $Selected, [string]$Mode, [string]$R
             if (-not (Test-Path $file)) { throw "$name.exe missing from $asset" }
             Copy-Item $file (Join-Path $BinDir "$name.exe") -Force
         }
+        Install-Manifests $Selected $tmp
     } finally {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -135,7 +201,6 @@ function Quote-Single([string]$Text) { return "'" + $Text.Replace("'", "''") + "
 if ($Port -lt 1 -or $Port -gt 65535) { throw '-Port must be between 1 and 65535' }
 if ($FromSource -and $FromRelease) { throw 'use only one of -FromSource and -FromRelease' }
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
 $BinDir = Join-Path $Prefix 'bin'
 
 if ($FromSource) { $Mode = 'source' }
@@ -149,6 +214,7 @@ $Names = @('simpletickets') + @($Selected | ForEach-Object { $_.Binary })
 Write-Host "Install mode: $Mode"
 Write-Host "Binaries:     $BinDir ($($Names -join ' '))"
 Write-Host "Tickets:      $TicketsDir"
+if ($Selected.Count -gt 0) { Write-Host "Plugins:      $PluginsDir" }
 if (-not $NoService) { Write-Host "Service:      scheduled task '$TaskName' at logon (port $Port)" }
 
 if ($DryRun) {

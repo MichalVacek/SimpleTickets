@@ -37,7 +37,7 @@ install:
 | `token` | no | How the token is delivered: `file` (default) or `env`, see [Token handling](#token-handling) |
 | `health` | no | Services only: `url` (http or https, must answer `2xx`), `interval_seconds` (default 10), `timeout_seconds` (default 3) |
 | `capabilities` | no | What the plugin intends to do, as lower-case words such as `tickets.read` or `events`. See [Capabilities](#capabilities) |
-| `install` | no | `package` and `binary`: how `scripts/install.sh` builds the plugin from this repository. A manifest with an `install` block is offered as an addon |
+| `install` | no | `package` and `binary`: how the installers build the plugin from this repository. A manifest with an `install` block is offered as an addon |
 
 An unknown key is an error, so a typo is reported instead of ignored.
 
@@ -65,7 +65,7 @@ The daemon and the `plugins` commands look in two places, in this order:
 1. `<tickets folder>/.simpletickets/plugins/<name>/plugin.yml`: plugins for this tickets folder only.
 2. The per-user plugins folder: `$SIMPLETICKETS_PLUGINS_DIR`, else `$XDG_CONFIG_HOME/simpletickets/plugins` or `~/.config/simpletickets/plugins`, and on Windows `%APPDATA%\simpletickets\plugins`.
 
-A name found in both places resolves to the first. A folder without a `plugin.yml` is ignored; a folder whose manifest is invalid, or whose `name` differs from the folder name, is listed with the error and cannot be enabled. `scripts/install.sh` copies the manifests of the addons it installs into the per-user folder (`--plugins-dir` changes it).
+A name found in both places resolves to the first. A folder without a `plugin.yml` is ignored; a folder whose manifest is invalid, or whose `name` differs from the folder name, is listed with the error and cannot be enabled. `scripts/install.sh` and `scripts/install.ps1` copy the manifests of the addons they install into the per-user folder (`--plugins-dir` or `-PluginsDir` changes it).
 
 ## Enabling
 

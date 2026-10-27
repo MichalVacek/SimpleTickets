@@ -65,7 +65,7 @@ simpletickets plugins enable mcp
 
 ## Install
 
-Release archives are named `simpletickets-<target>.tar.gz` (`.zip` on Windows) and contain `simpletickets`, `simpletickets-mcp`, `simpletickets-ui`, `simpletickets-sync` and the connectors `simpletickets-connector-archive` and `simpletickets-connector-jira`; `SHA256SUMS` lists their checksums. The installers verify the archive against it.
+Release archives are named `simpletickets-<target>.tar.gz` (`.zip` on Windows) and contain `simpletickets`, `simpletickets-mcp`, `simpletickets-ui`, `simpletickets-sync` and the connectors `simpletickets-connector-archive` and `simpletickets-connector-jira`, plus a `plugins/<name>/plugin.yml` manifest for each; `SHA256SUMS` lists their checksums. The installers verify the archive against it.
 
 | Target | Archive |
 |---|---|
@@ -100,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -DryRun
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Yes -Addons mcp
 ```
 
-The script copies the binaries to `%LOCALAPPDATA%\SimpleTickets\bin`, creates the tickets folder (`~\SimpleTickets`) and registers a per-user scheduled task named `SimpleTickets` that starts the daemon at logon (hidden, restarted up to three times if it exits). A true Windows service is out of scope: the daemon does not implement the service control protocol, and a scheduled task needs no administrator rights. Remove it with `Unregister-ScheduledTask -TaskName SimpleTickets -Confirm:$false`. Parameters: `-Prefix`, `-TicketsDir`, `-Port`, `-Addons`, `-FromSource`, `-FromRelease`, `-NoService`, `-NoStart`, `-Yes`, `-DryRun`.
+The script copies the binaries to `%LOCALAPPDATA%\SimpleTickets\bin`, creates the tickets folder (`~\SimpleTickets`) and registers a per-user scheduled task named `SimpleTickets` that starts the daemon at logon (hidden, restarted up to three times if it exits). A true Windows service is out of scope: the daemon does not implement the service control protocol, and a scheduled task needs no administrator rights. Remove it with `Unregister-ScheduledTask -TaskName SimpleTickets -Confirm:$false`. Parameters: `-Prefix`, `-TicketsDir`, `-Port`, `-Addons`, `-PluginsDir`, `-FromSource`, `-FromRelease`, `-NoService`, `-NoStart`, `-Yes`, `-DryRun`.
 
 Status: untested. The script has not been run or parsed by PowerShell, and the Windows build is only exercised by the CI Windows job once it runs.
 
@@ -108,7 +108,7 @@ Status: untested. The script has not been run or parsed by PowerShell, and the W
 
 `--prefix`, `--tickets-dir`, `--port`, `--addons LIST|none`, `--plugins-dir`, `--from-source`, `--from-release`, `--launchagents-dir` (macOS), `--systemd-dir` (Linux), `--no-service`, `--no-load`, `--yes`, `--dry-run`, `--os macos|linux` (previews only, needs `--dry-run`).
 
-`install.sh` builds its addon list from the plugin manifests in `plugins/*/plugin.yml`: a manifest with an `install:` block (package and binary) is offered as an addon, and its manifest is copied into the per-user plugins folder so the daemon finds it (see [docs/plugins.md](docs/plugins.md)). `install.ps1` still has its own `$Addons` list.
+`install.sh` builds its addon list from the plugin manifests in `plugins/*/plugin.yml`: a manifest with an `install:` block (package and binary) is offered as an addon, and its manifest is copied into the per-user plugins folder so the daemon finds it (see [docs/plugins.md](docs/plugins.md)). `install.ps1` does the same with a minimal line parser and copies the manifests into `%APPDATA%\simpletickets\plugins` (`-PluginsDir` changes it); this manifest handling is unrun, like the rest of the script.
 
 ## Docker
 
