@@ -17,6 +17,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 repository = "https://github.com/MichalVacek/SimpleTickets"
+license = "MIT"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

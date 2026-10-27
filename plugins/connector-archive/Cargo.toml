@@ -3,6 +3,7 @@ name = "simpletickets-connector-archive"
 description = "Sync connector that writes one file per ticket to a folder"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 publish = false

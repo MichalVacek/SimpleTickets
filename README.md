@@ -267,4 +267,4 @@ simpletickets migrate status
 
 ## License
 
-Not yet chosen.
+[MIT](LICENSE).
