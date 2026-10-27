@@ -28,25 +28,28 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p simpletickets -p simpletickets-mcp -p simpletickets-ui
+        run: cargo build --release --locked --target ${{ matrix.target }} -p simpletickets -p simpletickets-mcp -p simpletickets-ui -p simpletickets-sync -p simpletickets-connector-archive -p simpletickets-connector-jira
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           name="simpletickets-${{ matrix.target }}"
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/simpletickets target/${{ matrix.target }}/release/simpletickets-mcp target/${{ matrix.target }}/release/simpletickets-ui dist/
-          mkdir -p dist/plugins/mcp dist/plugins/ui
+          cp target/${{ matrix.target }}/release/simpletickets target/${{ matrix.target }}/release/simpletickets-mcp target/${{ matrix.target }}/release/simpletickets-ui target/${{ matrix.target }}/release/simpletickets-sync target/${{ matrix.target }}/release/simpletickets-connector-archive target/${{ matrix.target }}/release/simpletickets-connector-jira dist/
+          mkdir -p dist/plugins/mcp dist/plugins/ui dist/plugins/sync dist/plugins/connector-archive dist/plugins/connector-jira
           cp plugins/mcp/plugin.yml dist/plugins/mcp/
           cp plugins/ui/plugin.yml dist/plugins/ui/
-          tar -czf "$name.tar.gz" -C dist simpletickets simpletickets-mcp simpletickets-ui plugins
+          cp plugins/sync/plugin.yml dist/plugins/sync/
+          cp plugins/connector-archive/plugin.yml dist/plugins/connector-archive/
+          cp plugins/connector-jira/plugin.yml dist/plugins/connector-jira/
+          tar -czf "$name.tar.gz" -C dist simpletickets simpletickets-mcp simpletickets-ui simpletickets-sync simpletickets-connector-archive simpletickets-connector-jira plugins
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $name = "simpletickets-${{ matrix.target }}"
           $release = "target/${{ matrix.target }}/release"
-          Compress-Archive -Path "$release/simpletickets.exe", "$release/simpletickets-mcp.exe", "$release/simpletickets-ui.exe" -DestinationPath "$name.zip"
+          Compress-Archive -Path "$release/simpletickets.exe", "$release/simpletickets-mcp.exe", "$release/simpletickets-ui.exe", "$release/simpletickets-sync.exe", "$release/simpletickets-connector-archive.exe", "$release/simpletickets-connector-jira.exe" -DestinationPath "$name.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: simpletickets-${{ matrix.target }}

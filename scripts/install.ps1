@@ -42,6 +42,9 @@ $TaskName = 'SimpleTickets'
 $AddonList = @(
     @{ Name = 'mcp'; Crate = 'simpletickets-mcp'; Binary = 'simpletickets-mcp'; Description = 'MCP server so a client can list, create and update tickets' }
     @{ Name = 'ui'; Crate = 'simpletickets-ui'; Binary = 'simpletickets-ui'; Description = 'Kanban board in the browser, served on 127.0.0.1' }
+    @{ Name = 'sync'; Crate = 'simpletickets-sync'; Binary = 'simpletickets-sync'; Description = 'Synchronization to other trackers through connector plugins' }
+    @{ Name = 'connector-archive'; Crate = 'simpletickets-connector-archive'; Binary = 'simpletickets-connector-archive'; Description = 'Sync connector writing one file per ticket to a folder' }
+    @{ Name = 'connector-jira'; Crate = 'simpletickets-connector-jira'; Binary = 'simpletickets-connector-jira'; Description = 'Sync connector for Jira Cloud (unverified against a live site)' }
 )
 
 function Confirm-Default([string]$Prompt, [bool]$Default) {
@@ -190,5 +193,8 @@ if ($Selected | Where-Object { $_.Name -eq 'mcp' }) {
 }
 if ($Selected | Where-Object { $_.Name -eq 'ui' }) {
     Write-Host "Board: run '$(Join-Path $BinDir 'simpletickets-ui.exe') --dir $TicketsDir' and open the address it prints."
+}
+if ($Selected | Where-Object { $_.Name -eq 'sync' }) {
+    Write-Host "Sync: write $TicketsDir\.simpletickets\sync\config.yml (see docs/sync.md), then run 'simpletickets plugins enable sync'."
 }
 Write-Host 'done'

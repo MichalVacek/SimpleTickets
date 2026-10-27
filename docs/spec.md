@@ -58,7 +58,7 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 
 1. UI for the API layer.
 2. MCP server layer on top of the API.
-3. Synchronization to other software (built against Jira).
+3. Synchronization to other software (built against Jira); see [sync.md](sync.md).
 
 ## Decisions
 
@@ -97,9 +97,16 @@ Lightweight, open-source ticketing app that runs in the background (Mac, Windows
 - Plugins are described by a `plugin.yml` manifest (YAML, like the config) in `<tickets folder>/.simpletickets/plugins/<name>/` or the per-user plugins folder; `plugins.enabled` in `simpletickets.yml` lists the enabled ones. A `stdio-client` plugin is started by its client; a `service` plugin is started and supervised by the daemon. The token reaches a plugin through a file path or an environment variable, never the command line. See [plugins.md](plugins.md).
 - The daemon supervises enabled `service` plugins: started after the API listens with a cleared environment plus connection info, output captured into the log, restarted after crashes with capped doubling backoff, marked failed after 5 crashes in 60 seconds, stopped (SIGTERM, then kill after a grace period) before the API on shutdown or when disabled. Status is `GET /v1/plugins` and `plugin.*` events. Health checks report, they do not restart.
 - Workflow automation stays outside the core, as a plugin on the event stream and the API. The core provides three primitives and no rule language: an actor (`X-SimpleTickets-Actor`, recorded in the audit log and in the `actor` field of ticket events, whose `source` keeps its meaning), idempotency keys on create and update (`Idempotency-Key`, stored for 24 hours on disk, scoped by actor), and `GET /v1/audit` filtered by actor and ticket. There is no pre-write hook: rules are reconciled after the fact, so a plugin reacts to events and writes through the API. See [plugins.md](plugins.md).
+- Synchronization is a plugin trio, specified in [sync.md](sync.md): a `service` sync plugin owns all sync state (ticket to remote item, last synced hash, base values, cursors, conflicts) in `.simpletickets/sync/` and never in ticket files, and talks to connector processes (`stdio-client` plugins) over a versioned, line-delimited JSON protocol on stdio (`describe`, `configure`, `push`, `fetch`, `close`, `check`). Targets and mappings live in the sync plugin's own `config.yml`; secrets only in environment variables whose names the config lists. Default direction is push; `direction: both` writes remote status and field changes back through the API as the actor `plugin:sync` with idempotency keys, never touching a body. Conflicts (both sides changed a field since the last sync) are always recorded; `local-wins` is the default policy, `remote-wins` and `manual` are configurable. Deleted tickets close the remote item (tombstone in the sync state) and nothing is ever deleted remotely. Dry-run reads only.
+- The sync plugin consumes the event stream with the documented gap rule plus a periodic full reconcile, so a missed event, a daemon restart or a restart of the plugin itself never duplicates a push: change detection is a digest of the payload compared with the stored one.
+- Connectors are separate programs so the sync plugin does not care how many targets or kinds exist. Two ship: archive (a file per ticket; the reference implementation and test double) and Jira (REST API v3). The Jira connector is tested only against an in-process mock server; behaviour on a live site is unverified.
 
 ## Open questions
 
+- Sync against a live Jira: field names, workflow transitions, team-managed versus company-managed parent rules, permission errors and rate limits are untested outside the mock. Epics and custom fields are not mapped.
+- Sync reads every synced ticket on each reconcile because the list route has no bodies. A body digest in the list route (or a cheaper change feed) would remove that cost.
+- The sync lock is a heartbeat file, stale after 60 seconds; a hard-killed plugin on Windows can leave it behind until then (a daemon-supervised plugin takes it over at once).
+- Connector discovery is by command name in the sync config; there is no registry of installed connectors or version negotiation beyond `protocol: [1]`.
 - Offline detection is per root: an unreadable subfolder inside a readable root is reported by doctor, but its tickets are covered by tombstones only, not frozen.
 - The lease compares heartbeats with the local clock, so a large clock difference between machines sharing a folder can make a live lease look stale. Should it carry a host name, or use file locks where the file system supports them?
 - Durable webhook delivery (an on-disk queue that survives a daemon restart) and a way to replay missed events, if a receiver ever needs more than at-least-once while the daemon is up.

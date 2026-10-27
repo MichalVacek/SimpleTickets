@@ -202,3 +202,7 @@ simpletickets --dir <tickets folder> daemon
 ```
 
 Then finish a ticket (`simpletickets set-status ST-1 done`; the daemon picks the change up on its next scan or file event) and list the tickets. `simpletickets plugins status` shows the plugin running, and `GET /v1/audit?actor=plugin:follow-up` shows what it did. The integration test `examples/plugins/follow-up/tests/follow_up.rs` runs exactly this against a real daemon.
+
+### Larger example: synchronization
+
+[`plugins/sync`](../plugins/sync) is a bigger `service` plugin built the same way: it follows the event stream with the gap rule, writes back through the API under its own actor with idempotency keys, and keeps its own state in `.simpletickets/sync/`. It also starts child processes of its own (connectors) over a stdio protocol. See [sync.md](sync.md).

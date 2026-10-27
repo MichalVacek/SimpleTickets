@@ -11,6 +11,7 @@ crates/
   simpletickets/          binary: CLI + daemon + HTTP API
 plugins/
   mcp/                    out-of-process MCP plugin (separate crate)
+  sync/                   sync plugin; connector-protocol/, connector-archive/ and connector-jira/ beside it
 ```
 
 ## Slices
@@ -72,8 +73,14 @@ plugins/
 - Installer script for macOS (launchd) and Linux (systemd user unit) that asks which addons to include, PowerShell installer with a logon scheduled task, Dockerfile with polling fallback for bind mounts and a TCP health check, release workflow for five targets.
 - Depends on: 8, 11. Size: ~300 lines.
 
+### 13. Synchronization (addon 3)
+- Connector protocol crate (`plugins/connector-protocol`), archive connector (`plugins/connector-archive`), sync plugin (`plugins/sync`), Jira connector (`plugins/connector-jira`) with an in-process mock server for its tests. Specified in [sync.md](sync.md).
+- Tests: protocol units, sync engine and CLI against a live in-process daemon with the archive connector (create, update, restart without duplicates, conflicts, dry-run, deletion, supervised service), Jira connector and the whole path against the mock.
+- Depends on: 8, 12 (events, actors, idempotency, plugins). Not verified against a live Jira.
+
 ## Open questions
 
+- Jira sync has never run against a real site (see [sync.md](sync.md#jira-connector)).
 - Plugin sandboxing: plugins run with the user's rights and the full API token; capabilities in a manifest are declarations, not enforcement (see [plugins.md](plugins.md)).
 - Windows as a real service, signed releases, musl builds.
 - Release archives: `release.yml` publishes the assets the installers expect; it has not run yet (no tag pushed). Windows and Linux installs are untested on real machines.

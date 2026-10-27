@@ -88,7 +88,7 @@ USAGE
   local entry
   for entry in "${ADDONS[@]}"; do
     IFS='|' read -r name _ _ description _ <<<"$entry"
-    printf '  %-8s %s\n' "$name" "$description"
+    printf '  %-18s %s\n' "$name" "$description"
   done
 }
 
@@ -459,6 +459,9 @@ for entry in "${SELECTED[@]+"${SELECTED[@]}"}"; do
   fi
   if [ "${entry%%|*}" = "simpletickets-ui" ]; then
     echo "Board: run '$BIN_DIR/simpletickets-ui --dir $TICKETS_DIR' and open the address it prints, or run 'simpletickets plugins enable ui' so the daemon starts it."
+  fi
+  if [ "${entry%%|*}" = "simpletickets-sync" ]; then
+    echo "Sync: write $TICKETS_DIR/.simpletickets/sync/config.yml (see docs/sync.md), then run 'simpletickets plugins enable sync'."
   fi
 done
 echo "done"

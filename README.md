@@ -2,7 +2,7 @@
 
 A lightweight, local-first ticketing app. Tickets are plain Markdown files in a folder tree, much like an Obsidian vault. A small background daemon keeps them consistent and exposes a local API. Everything beyond ticket management is a plugin.
 
-Status: v0.1 scope is complete: the core (command line, daemon, local API, rules, migration, update check) and a minimal MCP plugin work end to end, with installers for macOS, Linux and Windows, a release workflow and a Docker image. Only macOS and Docker installs have been exercised on a real machine; see [Install](#install). Still to come: sync to other trackers, signed releases.
+Status: v0.1 scope is complete: the core (command line, daemon, local API, rules, migration, update check) and a minimal MCP plugin work end to end, with installers for macOS, Linux and Windows, a release workflow and a Docker image. Only macOS and Docker installs have been exercised on a real machine; see [Install](#install). Also built: synchronization to other trackers (a sync plugin with an archive and a Jira connector; the Jira connector has only been tested against a mock server, not a live site). Still to come: signed releases.
 
 ## Goals
 
@@ -23,6 +23,7 @@ Status: v0.1 scope is complete: the core (command line, daemon, local API, rules
 | `Dockerfile` | Container image |
 | `crates/` | Rust crates for the core |
 | `plugins/` | Out-of-process plugins |
+| `plugins/sync`, `plugins/connector-*` | Synchronization: the sync plugin, the connector protocol, the archive and Jira connectors |
 | `examples/plugins/` | Example plugins, such as `follow-up` (a workflow plugin) |
 | `examples/tickets/` | Sample ticket folder |
 
@@ -64,7 +65,7 @@ simpletickets plugins enable mcp
 
 ## Install
 
-Release archives are named `simpletickets-<target>.tar.gz` (`.zip` on Windows) and contain `simpletickets`, `simpletickets-mcp` and `simpletickets-ui`; `SHA256SUMS` lists their checksums. The installers verify the archive against it.
+Release archives are named `simpletickets-<target>.tar.gz` (`.zip` on Windows) and contain `simpletickets`, `simpletickets-mcp`, `simpletickets-ui`, `simpletickets-sync` and the connectors `simpletickets-connector-archive` and `simpletickets-connector-jira`; `SHA256SUMS` lists their checksums. The installers verify the archive against it.
 
 | Target | Archive |
 |---|---|
@@ -214,6 +215,24 @@ Settings come from flags or `SIMPLETICKETS_URL`, `SIMPLETICKETS_TOKEN`, `SIMPLET
 
 API errors come back as tool errors, so a client sees the daemon's message (for example an unknown status).
 
+## Sync plugin
+
+`plugins/sync` builds `simpletickets-sync`, a service plugin that mirrors tickets to other trackers through separate connector programs. The core reserves no fields for it: the plugin keeps its own state (ticket to remote item, last synced values, conflicts) under `.simpletickets/sync/` and never writes into ticket files. It follows the event stream (resyncing on a gap), reconciles periodically, pushes local changes through the connector protocol, and with `direction: both` writes remote status and field changes back through the API as the actor `plugin:sync`. Local wins conflicts by default; conflicts are always recorded and listed, never guessed, and a ticket body is never overwritten. Deleted tickets close the remote item and never delete it.
+
+```
+scripts/install.sh --addons sync,connector-archive,connector-jira
+simpletickets plugins enable sync
+simpletickets-sync status [--check]
+simpletickets-sync dry-run
+simpletickets-sync push-now [ID...] [--prefer local|remote]
+simpletickets-sync list-conflicts
+```
+
+- `connector-archive` writes one JSON or Markdown file per ticket to a folder; it is the reference connector and the test double.
+- `connector-jira` talks to Jira Cloud (REST API v3): issues, status transitions, priority, labels, assignee, sub-tasks, blocked-by links, descriptions rendered to ADF. Credentials come only from `JIRA_SITE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN`. **It is tested against an in-process mock server only; behaviour on a live Jira site is unverified.**
+
+Configuration, the state model, conflict and deletion rules, the connector protocol and the Jira mapping and limits are in [docs/sync.md](docs/sync.md).
+
 ## Update check
 
 The daemon asks the GitHub releases of `MichalVacek/SimpleTickets` for the latest release at startup and then every 24 hours (`--update-interval-hours`). A newer version is announced once through an `update.available` event and in the `update` field of `/v1/health`. Nothing is downloaded or installed. Being offline or hitting a GitHub error is silent; the check simply runs again later. Disable it with `--no-update-check`.
@@ -240,6 +259,8 @@ simpletickets migrate status
 
 - [Specification](docs/spec.md)
 - [HTTP API and event contract](docs/api.md)
+- [Plugins](docs/plugins.md)
+- [Synchronization and the connector protocol](docs/sync.md)
 - [Design review](docs/design-review.md)
 
 ## License
