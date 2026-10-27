@@ -743,6 +743,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "simpletickets-ui"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde_json",
+ "simpletickets",
+ "tempfile",
+ "tiny_http",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

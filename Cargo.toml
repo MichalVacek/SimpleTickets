@@ -4,6 +4,7 @@ members = [
     "crates/simpletickets-core",
     "crates/simpletickets",
     "plugins/mcp",
+    "plugins/ui",
     "examples/plugins/follow-up",
 ]
 

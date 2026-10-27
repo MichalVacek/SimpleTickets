@@ -457,5 +457,8 @@ for entry in "${SELECTED[@]+"${SELECTED[@]}"}"; do
   if [ "${entry%%|*}" = "simpletickets-mcp" ]; then
     echo "MCP server: register '$BIN_DIR/simpletickets-mcp --dir $TICKETS_DIR' as a stdio server in your MCP client."
   fi
+  if [ "${entry%%|*}" = "simpletickets-ui" ]; then
+    echo "Board: run '$BIN_DIR/simpletickets-ui --dir $TICKETS_DIR' and open the address it prints, or run 'simpletickets plugins enable ui' so the daemon starts it."
+  fi
 done
 echo "done"

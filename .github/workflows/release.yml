@@ -28,24 +28,25 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p simpletickets -p simpletickets-mcp
+        run: cargo build --release --locked --target ${{ matrix.target }} -p simpletickets -p simpletickets-mcp -p simpletickets-ui
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           name="simpletickets-${{ matrix.target }}"
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/simpletickets target/${{ matrix.target }}/release/simpletickets-mcp dist/
-          mkdir -p dist/plugins/mcp
+          cp target/${{ matrix.target }}/release/simpletickets target/${{ matrix.target }}/release/simpletickets-mcp target/${{ matrix.target }}/release/simpletickets-ui dist/
+          mkdir -p dist/plugins/mcp dist/plugins/ui
           cp plugins/mcp/plugin.yml dist/plugins/mcp/
-          tar -czf "$name.tar.gz" -C dist simpletickets simpletickets-mcp plugins
+          cp plugins/ui/plugin.yml dist/plugins/ui/
+          tar -czf "$name.tar.gz" -C dist simpletickets simpletickets-mcp simpletickets-ui plugins
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $name = "simpletickets-${{ matrix.target }}"
           $release = "target/${{ matrix.target }}/release"
-          Compress-Archive -Path "$release/simpletickets.exe", "$release/simpletickets-mcp.exe" -DestinationPath "$name.zip"
+          Compress-Archive -Path "$release/simpletickets.exe", "$release/simpletickets-mcp.exe", "$release/simpletickets-ui.exe" -DestinationPath "$name.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: simpletickets-${{ matrix.target }}

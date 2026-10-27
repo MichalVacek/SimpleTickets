@@ -2,7 +2,7 @@
 
 A lightweight, local-first ticketing app. Tickets are plain Markdown files in a folder tree, much like an Obsidian vault. A small background daemon keeps them consistent and exposes a local API. Everything beyond ticket management is a plugin.
 
-Status: v0.1 scope is complete: the core (command line, daemon, local API, rules, migration, update check) and a minimal MCP plugin work end to end, with installers for macOS, Linux and Windows, a release workflow and a Docker image. Only macOS and Docker installs have been exercised on a real machine; see [Install](#install). Still to come: UI, sync to other trackers, signed releases.
+Status: v0.1 scope is complete: the core (command line, daemon, local API, rules, migration, update check) and a minimal MCP plugin work end to end, with installers for macOS, Linux and Windows, a release workflow and a Docker image. Only macOS and Docker installs have been exercised on a real machine; see [Install](#install). Still to come: sync to other trackers, signed releases.
 
 ## Goals
 
@@ -64,7 +64,7 @@ simpletickets plugins enable mcp
 
 ## Install
 
-Release archives are named `simpletickets-<target>.tar.gz` (`.zip` on Windows) and contain `simpletickets` and `simpletickets-mcp`; `SHA256SUMS` lists their checksums. The installers verify the archive against it.
+Release archives are named `simpletickets-<target>.tar.gz` (`.zip` on Windows) and contain `simpletickets`, `simpletickets-mcp` and `simpletickets-ui`; `SHA256SUMS` lists their checksums. The installers verify the archive against it.
 
 | Target | Archive |
 |---|---|
@@ -80,7 +80,7 @@ Pushing a tag `v*` runs `.github/workflows/release.yml`, which builds these, pub
 
 ```
 scripts/install.sh                 # asks which addons to include
-scripts/install.sh --yes --addons mcp
+scripts/install.sh --yes --addons mcp,ui
 scripts/install.sh --dry-run       # print the plan and the launchd plist, change nothing
 ```
 
@@ -179,6 +179,17 @@ Search covers ticket titles and Markdown bodies (other frontmatter keys are not 
 - Ranking: each title occurrence scores 5, each body occurrence 1; equal scores come in ID order, so the order is deterministic.
 - Bodies are held in memory for snippets and matching, so memory grows with the total size of the ticket files. The index is rebuilt in full on each scan, which is fine for thousands of tickets but is not designed for very large folders.
 - A query with no letters or digits is refused (`400` over the API).
+
+## UI plugin
+
+`plugins/ui` builds `simpletickets-ui`, a local kanban board: a small web server on `127.0.0.1` that serves a single-page app and relays its requests to the daemon, adding the API token on the server side so the browser never sees it. Other websites cannot drive it: the `Host` must be a localhost name, state-changing requests must come from the board's own origin, and every request needs a per-session header token issued with the page.
+
+```
+cargo build --release -p simpletickets-ui
+simpletickets-ui --dir ~/tickets --port 7979     # then open http://127.0.0.1:7979/
+```
+
+Start the daemon first, or enable the plugin (`simpletickets plugins enable ui`) so the daemon starts and supervises the board on port 7979 (see [docs/plugins.md](docs/plugins.md)). Columns follow the status categories, cards can be dragged between them, and the board follows the event stream live. See [docs/ui.md](docs/ui.md).
 
 ## MCP plugin
 

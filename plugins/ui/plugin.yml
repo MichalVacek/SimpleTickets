@@ -1,0 +1,24 @@
+name: ui
+version: 0.1.0
+description: Kanban board in the browser, served on 127.0.0.1:7979
+api_version: 1
+kind: service
+command: simpletickets-ui
+args:
+  - --dir
+  - ${tickets_dir}
+  - --url
+  - ${api_url}
+  - --token-file
+  - ${token_file}
+  - --port
+  - "7979"
+health:
+  url: http://127.0.0.1:7979/
+capabilities:
+  - tickets.read
+  - tickets.write
+  - events
+install:
+  package: simpletickets-ui
+  binary: simpletickets-ui

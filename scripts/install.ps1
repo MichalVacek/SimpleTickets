@@ -41,6 +41,7 @@ $TaskName = 'SimpleTickets'
 # Addons: Name, Crate, Binary, Description. Add an entry to offer another addon.
 $AddonList = @(
     @{ Name = 'mcp'; Crate = 'simpletickets-mcp'; Binary = 'simpletickets-mcp'; Description = 'MCP server so a client can list, create and update tickets' }
+    @{ Name = 'ui'; Crate = 'simpletickets-ui'; Binary = 'simpletickets-ui'; Description = 'Kanban board in the browser, served on 127.0.0.1' }
 )
 
 function Confirm-Default([string]$Prompt, [bool]$Default) {
@@ -186,5 +187,8 @@ if (-not $NoService) {
 if (($env:PATH -split ';') -notcontains $BinDir) { Write-Host "note: $BinDir is not on your PATH" }
 if ($Selected | Where-Object { $_.Name -eq 'mcp' }) {
     Write-Host "MCP server: register '$(Join-Path $BinDir 'simpletickets-mcp.exe') --dir $TicketsDir' as a stdio server in your MCP client."
+}
+if ($Selected | Where-Object { $_.Name -eq 'ui' }) {
+    Write-Host "Board: run '$(Join-Path $BinDir 'simpletickets-ui.exe') --dir $TicketsDir' and open the address it prints."
 }
 Write-Host 'done'

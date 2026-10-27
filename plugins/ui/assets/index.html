@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="st-session" content="__SESSION__">
+<title>SimpleTickets</title>
+<link rel="icon" href="/favicon.ico">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<a class="skip" href="#board">Skip to the board</a>
+<header class="top">
+  <h1>SimpleTickets</h1>
+  <form class="filters" id="filters" role="search" aria-label="Filter tickets">
+    <label class="grow"><span class="sr">Search</span>
+      <input type="search" id="f-text" placeholder="Search title and body" autocomplete="off"></label>
+    <label><span class="sr">Assignee</span>
+      <select id="f-assignee"><option value="">Any assignee</option></select></label>
+    <label><span class="sr">Tag</span>
+      <select id="f-tag"><option value="">Any tag</option></select></label>
+    <label><span class="sr">Priority</span>
+      <select id="f-priority"><option value="">Any priority</option></select></label>
+    <label><span class="sr">Blocked</span>
+      <select id="f-blocked">
+        <option value="">Blocked or not</option>
+        <option value="yes">Blocked only</option>
+        <option value="no">Not blocked</option>
+      </select></label>
+    <button type="button" id="f-clear">Clear</button>
+  </form>
+  <button type="button" id="new-ticket" class="primary">New ticket</button>
+</header>
+<div id="banner" class="banner" role="status" hidden></div>
+<div class="layout">
+  <main id="board" class="board" tabindex="-1" aria-label="Board"></main>
+  <aside id="detail" class="detail" aria-label="Ticket detail" hidden></aside>
+</div>
+<dialog id="create" aria-labelledby="create-title">
+  <form method="dialog" id="create-form">
+    <h2 id="create-title">New ticket</h2>
+    <label>Title <input name="title" required maxlength="300"></label>
+    <label>Status <select name="status"></select></label>
+    <label>Priority <input name="priority" list="priority-list" maxlength="40"></label>
+    <datalist id="priority-list"></datalist>
+    <label>Assignee <input name="assignee" maxlength="100"></label>
+    <label>Due <input name="due" type="date"></label>
+    <label>Tags <input name="tags" placeholder="comma separated"></label>
+    <label>Parent <input name="parent" placeholder="ticket id, optional"></label>
+    <label>Body <textarea name="body" rows="5"></textarea></label>
+    <p class="error" id="create-error" role="alert"></p>
+    <div class="row">
+      <button type="button" id="create-cancel">Cancel</button>
+      <button type="submit" class="primary">Create</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/app.js"></script>
+</body>
+</html>
