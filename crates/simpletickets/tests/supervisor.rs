@@ -222,7 +222,10 @@ fn disabling_stops_a_plugin_and_enabling_starts_it_again() {
 
     enable(tickets.path(), &["idle"]);
     assert_eq!(h.api.post("/v1/rescan", "").0, 200);
-    assert!(wait_for(|| h.events("plugin.started").len() == 2));
+    // Where a plugin cannot be stopped gracefully (Windows) the first process leaves its
+    // lease behind, so the restarted one may exit and be restarted again; only the fact
+    // that the supervisor started it again matters here.
+    assert!(wait_for(|| h.events("plugin.started").len() >= 2));
 }
 
 #[test]
