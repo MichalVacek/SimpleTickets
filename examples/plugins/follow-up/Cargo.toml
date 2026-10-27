@@ -1,0 +1,18 @@
+[package]
+name = "simpletickets-follow-up"
+description = "Example plugin: creates a follow-up ticket whenever a ticket is finished"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "1.0.154"
+
+[dev-dependencies]
+simpletickets = { path = "../../../crates/simpletickets" }
+tempfile = "3.27.0"

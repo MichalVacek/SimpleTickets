@@ -23,6 +23,7 @@ Status: v0.1 scope is complete: the core (command line, daemon, local API, rules
 | `Dockerfile` | Container image |
 | `crates/` | Rust crates for the core |
 | `plugins/` | Out-of-process plugins |
+| `examples/plugins/` | Example plugins, such as `follow-up` (a workflow plugin) |
 | `examples/tickets/` | Sample ticket folder |
 
 ## Usage

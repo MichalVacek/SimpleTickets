@@ -149,3 +149,56 @@ With `health.url` set, the daemon sends a GET every `interval_seconds` while the
 | `stopped` | Stopped by the supervisor and about to disappear from the list |
 
 The events `plugin.started`, `plugin.stopped`, `plugin.crashed` and `plugin.failed` are published on the [event stream](api.md#event-types).
+
+## Building workflow automation
+
+Workflow automation ("when X happens, do Y") is not part of the core and the core has no rule language. A workflow plugin is an ordinary plugin built from the pieces the core already offers. The core's own rules (an unblocked ticket, a parent that follows its sub-tickets) are reconciled after every scan; a workflow plugin reacts to the same facts after the fact.
+
+There is deliberately no pre-write hook: nothing can veto or rewrite a change before it is made, because the files are also edited by people, editors and git, and the daemon only ever sees the result. A plugin that needs to veto something does it afterwards, by writing a correcting change under its own actor, which the audit log then shows.
+
+### The pieces
+
+| Need | Use |
+|---|---|
+| Learn that something happened | The [event stream](api.md#events) by long polling (`GET /v1/events?since=N&wait=20`), or a [webhook](api.md#webhooks) for a receiver that is not a child of the daemon |
+| Read the current state | `GET /v1/tickets`, `GET /v1/tickets/{id}`, `GET /v1/search` |
+| Act | `POST /v1/tickets`, `PATCH /v1/tickets/{id}` |
+| Be identified | `X-SimpleTickets-Actor`, recorded in the [audit log and in event payloads](api.md#actors) |
+| Act once | `Idempotency-Key`, see [Idempotency](api.md#idempotency) |
+| Explain afterwards | `GET /v1/audit?actor=plugin:<name>` |
+
+### Rules of thumb
+
+- Events are at-least-once and not durable. Handlers must be idempotent: derive an idempotency key from the intended effect (`follow-up:<ticket id>`), not from the event's `seq`, so a replayed event, a retry and a restart all collapse into one effect.
+- Keep a cursor (`next` of the last processed page) and send back the `stream` of the page. On a `gap` (the daemon restarted, or the plugin fell behind the backlog) take `next`, reload the state you care about through the list routes, and continue. A plugin that only reacts to new changes may simply continue from `next`.
+- Start from the whole retained backlog (call without `since`) when missing a recent event would matter; with idempotent effects, reprocessing is harmless.
+- Check the event's `source` and `actor` to avoid loops: an event caused by your own write carries your actor, and one caused by a rule has `source` `rule`. A plugin that reacts to its own output must also end the chain by content (the example skips tickets that it created itself).
+- Write only through the API. A plugin that edits ticket files directly loses the compare-and-swap safety, the audit entry and the actor.
+- Webhooks suit a plugin that runs elsewhere or that is not a child of the daemon; a `service` plugin started by the daemon can simply long poll, which needs no secret and no listening port.
+
+### Example: follow-up tickets
+
+[`examples/plugins/follow-up`](../examples/plugins/follow-up) is a complete `service` plugin in about 200 lines of Rust with no dependencies beyond `serde_json`. When a ticket's status changes to one in the `done` category (`ticket.status_changed` with `to_category` `done`), it creates a ticket titled `Follow up: <title>`, tagged `follow-up` and related to the finished ticket:
+
+```
+POST /v1/tickets
+X-SimpleTickets-Actor: plugin:follow-up
+Idempotency-Key: follow-up:ST-1
+
+{"title": "Follow up: Ship release", "related": ["ST-1"], "tags": ["follow-up"]}
+```
+
+It reads its connection info from the environment the daemon provides (`SIMPLETICKETS_URL`, `SIMPLETICKETS_TOKEN_FILE`, `SIMPLETICKETS_ACTOR`), long polls the events, processes the retained backlog on start, and relies on the key to ignore repeats. A ticket that is reopened and finished again, a replayed event and a plugin restart all produce no second follow-up (the key names the ticket, and the daemon answers the repeat from its stored answer for 24 hours; `422` on a changed title is read as "already handled"). Finishing a follow-up does not create a follow-up of the follow-up.
+
+To try it:
+
+```
+cargo build --release -p simpletickets-follow-up
+mkdir -p <tickets folder>/.simpletickets/plugins/follow-up
+cp examples/plugins/follow-up/plugin.yml <tickets folder>/.simpletickets/plugins/follow-up/
+cp target/release/simpletickets-follow-up <tickets folder>/.simpletickets/plugins/follow-up/
+simpletickets --dir <tickets folder> plugins enable follow-up
+simpletickets --dir <tickets folder> daemon
+```
+
+Then finish a ticket (`simpletickets set-status ST-1 done`; the daemon picks the change up on its next scan or file event) and list the tickets. `simpletickets plugins status` shows the plugin running, and `GET /v1/audit?actor=plugin:follow-up` shows what it did. The integration test `examples/plugins/follow-up/tests/follow_up.rs` runs exactly this against a real daemon.

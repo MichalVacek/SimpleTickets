@@ -725,6 +725,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "simpletickets-follow-up"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "simpletickets",
+ "tempfile",
+]
+
+[[package]]
 name = "simpletickets-mcp"
 version = "0.1.0"
 dependencies = [

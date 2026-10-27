@@ -3,6 +3,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
 COPY plugins plugins
+COPY examples examples
 RUN cargo build --release --locked -p simpletickets -p simpletickets-mcp
 
 FROM debian:bookworm-slim

@@ -1,0 +1,9 @@
+name: follow-up
+version: 0.1.0
+description: Creates a follow-up ticket when a ticket is finished (example workflow plugin)
+api_version: 1
+kind: service
+command: simpletickets-follow-up
+capabilities:
+  - events
+  - tickets.write
