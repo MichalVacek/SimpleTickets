@@ -713,6 +713,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "simpletickets-connector-archive"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "simpletickets-connector-protocol",
+ "tempfile",
+]
+
+[[package]]
+name = "simpletickets-connector-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "simpletickets-core"
 version = "0.1.0"
 dependencies = [
@@ -739,6 +755,20 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "simpletickets",
+ "tempfile",
+]
+
+[[package]]
+name = "simpletickets-sync"
+version = "0.1.0"
+dependencies = [
+ "ctrlc",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "simpletickets",
+ "simpletickets-connector-protocol",
  "tempfile",
 ]
 
