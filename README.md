@@ -119,6 +119,8 @@ cat ~/tickets/.simpletickets/token       # the API token
 docker exec -i simpletickets simpletickets-mcp --dir /data    # MCP server inside the container
 ```
 
+The image contains `simpletickets`, `simpletickets-mcp`, `simpletickets-sync` and both connectors, with their manifests in `/usr/local/share/simpletickets/plugins` (`SIMPLETICKETS_PLUGINS_DIR`), so `docker exec simpletickets simpletickets plugins list` shows them and `plugins enable sync` works. The UI is not in the image: `simpletickets-ui` only listens on `127.0.0.1` and has no bind-address option, so it would not be reachable from outside the container. Use the UI from a native install, pointed at the published daemon port.
+
 The container runs `simpletickets --dir /data daemon --bind-all --poll`. Bind mounts often deliver no file events, so `--poll` (every 2 seconds, `--poll-interval`) detects changes by polling instead; use it for any folder on a network share or mount that misses events. `--bind-all` makes the daemon listen on all interfaces inside the container, which is what lets Docker publish the port; keep the `127.0.0.1:` prefix on `-p` so the API stays reachable from this machine only. The token still applies. The image has a health check that opens a TCP connection to port 7878; it cannot call `/v1/health` because every API route, health included, requires the token. The process runs as UID 1000; the mounted folder must be writable by it, or pass `--user $(id -u):$(id -g)`.
 
 ## Daemon and API
