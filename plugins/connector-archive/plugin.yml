@@ -1,0 +1,11 @@
+name: connector-archive
+version: 0.1.0
+description: Sync connector that writes one JSON or Markdown file per ticket to a folder
+api_version: 1
+kind: stdio-client
+command: simpletickets-connector-archive
+capabilities:
+  - connector
+install:
+  package: simpletickets-connector-archive
+  binary: simpletickets-connector-archive
