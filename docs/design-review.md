@@ -21,7 +21,7 @@ Defaults below are recommendations, not decisions. Decisions live in [spec.md](s
 15. Fixed fields or free-form frontmatter, filterable? (Default: fixed core fields plus free-form extras, exact-match filter.)
 16. Docker: bind-mount file watching on Mac/Windows? (Default: native is primary in v0.1.)
 17. Auto-update installs or only notifies? (Default: notify only until releases are signed.)
-18. Reserve sync fields in the file format now? (Default: `external:` map from v0.1.)
+18. Reserve sync fields in the file format now? (Superseded: the spec decides that core reserves no sync fields; sync state lives in the sync plugin.)
 19. What does this do that Backlog.md, git-bug, Obsidian Tasks/Kanban or GitHub Issues do not? Open.
 
 ## Edge cases to handle
@@ -35,7 +35,7 @@ Defaults below are recommendations, not decisions. Decisions live in [spec.md](s
 7. All sub-tickets done: parent goes to "ready for review", not done (configurable).
 8. Sub-ticket starts under a done/cancelled parent: reopen parent to in progress with warning, or refuse via config.
 9. Parent changes or disappears: recompute old and new parents each scan; list orphans.
-10. Root unavailable: mark offline, freeze tickets, run no rules.
+10. Root unavailable: mark offline, freeze tickets, run no rules. Detection is per root: an unreadable subfolder inside a readable root is not offline, so its tickets are protected by tombstones only, not frozen.
 11. Malformed frontmatter: skip, report file and line, never rewrite.
 12. Human and daemon edit the same file: compare-and-swap on content hash, patch frontmatter only, skip recently changed files.
 13. Crash mid-write or mid-migration: temp file + rename, migration journal, resume or roll back on startup.
