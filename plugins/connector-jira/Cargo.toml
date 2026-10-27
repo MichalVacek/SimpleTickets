@@ -1,0 +1,22 @@
+[package]
+name = "simpletickets-connector-jira"
+description = "Sync connector for Jira Cloud (REST API v3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = "1.0.154"
+simpletickets-connector-protocol = { path = "../connector-protocol" }
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+simpletickets = { path = "../../crates/simpletickets" }
+simpletickets-sync = { path = "../sync" }
+tempfile = "3.27.0"
+tiny_http = "0.12.0"

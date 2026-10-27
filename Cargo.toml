@@ -7,6 +7,7 @@ members = [
     "plugins/connector-protocol",
     "plugins/connector-archive",
     "plugins/sync",
+    "plugins/connector-jira",
     "plugins/ui",
     "examples/plugins/follow-up",
 ]

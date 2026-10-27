@@ -722,6 +722,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "simpletickets-connector-jira"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "simpletickets",
+ "simpletickets-connector-protocol",
+ "simpletickets-sync",
+ "tempfile",
+ "tiny_http",
+ "ureq",
+]
+
+[[package]]
 name = "simpletickets-connector-protocol"
 version = "0.1.0"
 dependencies = [

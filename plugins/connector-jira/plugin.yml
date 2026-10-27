@@ -1,0 +1,11 @@
+name: connector-jira
+version: 0.1.0
+description: Sync connector for Jira Cloud (REST API v3); needs JIRA_SITE_URL, JIRA_EMAIL and JIRA_API_TOKEN
+api_version: 1
+kind: stdio-client
+command: simpletickets-connector-jira
+capabilities:
+  - connector
+install:
+  package: simpletickets-connector-jira
+  binary: simpletickets-connector-jira
